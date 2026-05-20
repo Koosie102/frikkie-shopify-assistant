@@ -15,8 +15,10 @@ app.use(express.json());
 app.use(bodyParser.json({ limit: "50mb" }));
 app.use(
   cors({
-    origin: process.env.STORE_URL || "*",
+    origin: "*",
     credentials: true,
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Accept"],
   })
 );
 
@@ -92,15 +94,15 @@ function calculateCost(inputTokens, outputTokens) {
 }
 
 // Frikkie's system prompt
-const FRIKKIE_SYSTEM_PROMPT = `You are Frikkie, a friendly South African customer service AI assistant for a Shopify store specializing in 4x4 auxiliary lighting and outdoor gear.
+const FRIKKIE_SYSTEM_PROMPT = `You are Frikkie, a friendly South African customer service AI assistant for 4x4 Factory SA - specializing in 4x4 auxiliary lighting and outdoor gear.
 
 **Your Personality:**
 - Helpful, warm, and genuine
 - South African expressions: "Howzit!", "Ja nee!", "Lekker!", use them naturally
-- Expert on products you sell
+- Expert on products - ALTIQ, ULTRA, STEDI, NEO SUDS lighting
 - Honest - say when you don't know something
 - Friendly, conversational tone
-- References: You have 40+ years experience with 4x4s
+- References: 40+ years experience with 4x4s
 
 **Your Capabilities:**
 - Answer detailed product questions with specs
@@ -117,91 +119,24 @@ const FRIKKIE_SYSTEM_PROMPT = `You are Frikkie, a friendly South African custome
 3. Ask for order number if needed
 4. Keep responses concise but helpful
 5. Offer to escalate for complex issues (refunds, complaints)
-6. Use web search when needed - ask customer first
 
-**Current Store:**
-- Store: ${process.env.STORE_URL}
-- Specializes in: 4x4 auxiliary lighting and outdoor gear`;
+**Current Store:** 4x4 Factory SA - https://4x4-factory-sa.myshopify.com`;
 
-// Shopify GraphQL Helper
-async function shopifyGraphQL(query, variables = {}) {
-  const response = await axios.post(
-    `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-    { query, variables },
-    {
-      headers: {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-  return response.data;
-}
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
 
-// Get products from Shopify
-async function getProducts() {
-  const query = `{
-    products(first: 50) {
-      edges {
-        node {
-          id
-          title
-          description
-          variants(first: 10) {
-            edges {
-              node {
-                title
-                price
-              }
-            }
-          }
-        }
-      }
-    }
-  }`;
-  const result = await shopifyGraphQL(query);
-  return result.data?.products?.edges || [];
-}
-
-// Get order by email
-async function getOrderByEmail(email) {
-  const query = `{
-    orders(first: 10, query: "email:${email}") {
-      edges {
-        node {
-          id
-          orderNumber
-          email
-          createdAt
-          fulfillmentOrders(first: 5) {
-            edges {
-              node {
-                status
-                lineItems(first: 10) {
-                  edges {
-                    node {
-                      lineItem {
-                        title
-                        quantity
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }`;
-  const result = await shopifyGraphQL(query);
-  return result.data?.orders?.edges || [];
-}
-
-// Chat endpoint
+// Chat endpoint - MAIN ENDPOINT
 app.post("/api/chat", async (req, res) => {
   try {
+    console.log("Chat request received:", req.body);
+    
     const { message, conversationId, email, orderNumber } = req.body;
+
+    if (!message) {
+      return res.status(400).json({ error: "Message is required" });
+    }
 
     // Create or get conversation
     let convoId = conversationId;
@@ -210,12 +145,12 @@ app.post("/api/chat", async (req, res) => {
       const stmt = db.prepare(
         "INSERT INTO conversations (id, email, order_number) VALUES (?, ?, ?)"
       );
-      stmt.run(convoId, email, orderNumber);
+      stmt.run(convoId, email || "guest@example.com", orderNumber || "");
     }
 
     // Get conversation history
     const messageStmt = db.prepare(
-      "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at"
+      "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at LIMIT 20"
     );
     const history = messageStmt.all(convoId);
 
@@ -224,6 +159,8 @@ app.post("/api/chat", async (req, res) => {
       ...history.map((m) => ({ role: m.role, content: m.content })),
       { role: "user", content: message },
     ];
+
+    console.log(`Calling Claude with ${messages.length} messages...`);
 
     // Call Claude API
     const response = await client.messages.create({
@@ -264,13 +201,60 @@ app.post("/api/chat", async (req, res) => {
       new Date().toISOString()
     );
 
-    res.json({
+    console.log(`Response sent for conversation ${convoId}`);
+
+    return res.json({
       conversationId: convoId,
       message: assistantMessage,
       cost: cost,
     });
   } catch (error) {
     console.error("Chat error:", error);
+    res.status(500).json({ error: error.message || "Internal server error" });
+  }
+});
+
+// Serve favicon and static responses
+app.get("/", (req, res) => {
+  res.json({ status: "Frikkie Chat API is running!", version: "1.0.0" });
+});
+
+app.get("/admin", (req, res) => {
+  res.json({ message: "Admin dashboard - use /api/admin/stats" });
+});
+
+// Admin dashboard data
+app.get("/api/admin/stats", (req, res) => {
+  try {
+    const convCount = db
+      .prepare("SELECT COUNT(*) as count FROM conversations")
+      .get();
+    const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get();
+    const totalCost = db.prepare("SELECT SUM(cost) as total FROM messages").get();
+
+    res.json({
+      conversations: convCount.count,
+      messages: msgCount.count,
+      totalCost: totalCost.total || 0,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/conversations", (req, res) => {
+  try {
+    const stmt = db.prepare(`
+      SELECT c.id, c.email, c.order_number, c.created_at, COUNT(m.id) as messages
+      FROM conversations c
+      LEFT JOIN messages m ON c.id = m.conversation_id
+      GROUP BY c.id
+      ORDER BY c.created_at DESC
+      LIMIT 50
+    `);
+    const conversations = stmt.all();
+    res.json({ conversations });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -324,67 +308,9 @@ app.post("/api/escalate", async (req, res) => {
   }
 });
 
-// Serve frontend
-app.get("/", (req, res) => {
-  res.send("Frikkie Chat API is running!");
-});
-
-app.get("/api/products", async (req, res) => {
-  try {
-    const products = await getProducts();
-    res.json({ products });
-  } catch (error) {
-    console.error("Products error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get("/api/order/:email", async (req, res) => {
-  try {
-    const { email } = req.params;
-    const orders = await getOrderByEmail(email);
-    res.json({ orders });
-  } catch (error) {
-    console.error("Order lookup error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Admin dashboard data
-app.get("/api/admin/stats", (req, res) => {
-  try {
-    const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations");
-    const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages");
-    const totalCost = db.prepare("SELECT SUM(cost) as total FROM messages");
-
-    res.json({
-      conversations: convCount.get().count,
-      messages: msgCount.get().count,
-      totalCost: totalCost.get().total || 0,
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get("/api/admin/conversations", (req, res) => {
-  try {
-    const stmt = db.prepare(`
-      SELECT c.id, c.email, c.order_number, c.created_at, COUNT(m.id) as messages
-      FROM conversations c
-      LEFT JOIN messages m ON c.id = m.conversation_id
-      GROUP BY c.id
-      ORDER BY c.created_at DESC
-      LIMIT 50
-    `);
-    const conversations = stmt.all();
-    res.json({ conversations });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🎩 Frikkie is running on port ${PORT}`);
+  console.log(`API: https://frikkie-shopify-assistant-production.up.railway.app`);
+  console.log(`Health check: https://frikkie-shopify-assistant-production.up.railway.app/health`);
 });
