@@ -7,6 +7,9 @@ import Database from "better-sqlite3";
 import nodemailer from "nodemailer";
 import bodyParser from "body-parser";
 import { v4 as uuidv4 } from "uuid";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 dotenv.config();
 
@@ -23,6 +26,10 @@ app.use(
 );
 
 const client = new Anthropic();
+
+// Get __dirname in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Database setup
 const DATABASE_PATH = process.env.DATABASE_PATH || "./frikkie.db";
@@ -125,6 +132,28 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// Home/Dashboard endpoint
+app.get("/", (req, res) => {
+  try {
+    const dashboardPath = path.join(__dirname, "admin-dashboard.html");
+    if (fs.existsSync(dashboardPath)) {
+      const dashboardHTML = fs.readFileSync(dashboardPath, "utf8");
+      res.send(dashboardHTML);
+    } else {
+      res.json({ 
+        status: "Frikkie Chat API is running!", 
+        version: "1.0.0",
+        message: "Dashboard not found. Use /api/admin/stats for data"
+      });
+    }
+  } catch (error) {
+    res.json({ 
+      status: "Frikkie Chat API is running!", 
+      version: "1.0.0"
+    });
+  }
+});
+
 // Chat endpoint - MAIN ENDPOINT
 app.post("/api/chat", async (req, res) => {
   try {
@@ -164,7 +193,7 @@ app.post("/api/chat", async (req, res) => {
     // Call Claude API with shorter max tokens for quicker responses
     const response = await client.messages.create({
       model: "claude-opus-4-1",
-      max_tokens: 500, // Reduced from 1024 to keep responses shorter
+      max_tokens: 500,
       system: FRIKKIE_SYSTEM_PROMPT,
       messages: messages,
     });
@@ -213,15 +242,6 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// Serve favicon and static responses
-app.get("/", (req, res) => {
-  res.json({ status: "Frikkie Chat API is running!", version: "1.0.0" });
-});
-
-app.get("/admin", (req, res) => {
-  res.json({ message: "Admin dashboard - use /api/admin/stats" });
-});
-
 // Admin dashboard data
 app.get("/api/admin/stats", (req, res) => {
   try {
@@ -232,11 +252,12 @@ app.get("/api/admin/stats", (req, res) => {
     const totalCost = db.prepare("SELECT SUM(cost) as total FROM messages").get();
 
     res.json({
-      conversations: convCount.count,
-      messages: msgCount.count,
+      conversations: convCount.count || 0,
+      messages: msgCount.count || 0,
       totalCost: totalCost.total || 0,
     });
   } catch (error) {
+    console.error("Stats error:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -254,6 +275,7 @@ app.get("/api/admin/conversations", (req, res) => {
     const conversations = stmt.all();
     res.json({ conversations });
   } catch (error) {
+    console.error("Conversations error:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -311,5 +333,6 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🎩 Frikkie is running on port ${PORT}`);
   console.log(`API: https://frikkie-shopify-assistant-production.up.railway.app`);
+  console.log(`Dashboard: https://frikkie-shopify-assistant-production.up.railway.app/`);
   console.log(`Health check: https://frikkie-shopify-assistant-production.up.railway.app/health`);
 });
