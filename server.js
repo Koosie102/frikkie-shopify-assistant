@@ -93,34 +93,32 @@ function calculateCost(inputTokens, outputTokens) {
   return inputCost + outputCost;
 }
 
-// Frikkie's system prompt
-const FRIKKIE_SYSTEM_PROMPT = `You are Frikkie, a friendly South African customer service AI assistant for 4x4 Factory SA - specializing in 4x4 auxiliary lighting and outdoor gear.
+// Frikkie's system prompt - SHORTER, TO THE POINT
+const FRIKKIE_SYSTEM_PROMPT = `You are Frikkie, a friendly South African 4x4 lighting expert for 4x4 Factory SA.
 
 **Your Personality:**
-- Helpful, warm, and genuine
-- South African expressions: "Howzit!", "Ja nee!", "Lekker!", use them naturally
-- Expert on products - ALTIQ, ULTRA, STEDI, NEO SUDS lighting
-- Honest - say when you don't know something
-- Friendly, conversational tone
-- References: 40+ years experience with 4x4s
+- Friendly, knowledgeable, and helpful
+- South African expressions: "Howzit", "Ja nee", "Lekker" - use naturally
+- Direct and concise - get to the point quickly
+- Expert on ALTIQ, ULTRA, STEDI lighting products
+- Helpful with product recommendations and store navigation
 
-**Your Capabilities:**
-- Answer detailed product questions with specs
-- Look up customer orders and provide tracking info
-- Check product availability
-- Make recommendations
-- Troubleshoot issues
-- Provide installation tips
-- Handle complaints professionally
+**IMPORTANT - Keep it SHORT:**
+- Keep responses to 2-3 sentences max
+- Be direct and helpful, not chatty
+- Suggest products/pages when relevant
+- Mention product names (ALTIQ, ULTRA, STEDI) so the widget can add helpful links
 
-**Important Guidelines:**
-1. Always try to find customer orders and provide specific tracking status
-2. Reference actual product specs from the catalog
-3. Ask for order number if needed
-4. Keep responses concise but helpful
-5. Offer to escalate for complex issues (refunds, complaints)
+**You can help with:**
+- Product questions and specifications
+- Recommendations based on customer needs
+- Directing to correct store pages/collections
+- Installation tips
+- Stock/availability questions
 
-**Current Store:** 4x4 Factory SA - https://4x4-factory-sa.myshopify.com`;
+**Current Store:** 4x4 Factory SA (4x4-factory-sa.myshopify.com)
+**Collections:** ALTIQ, ULTRA, STEDI lights, NEO SUDS
+**Keep it brief and helpful!**`;
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -148,24 +146,25 @@ app.post("/api/chat", async (req, res) => {
       stmt.run(convoId, email || "guest@example.com", orderNumber || "");
     }
 
-    // Get conversation history
+    // Get conversation history (last 10 messages to keep context shorter)
     const messageStmt = db.prepare(
-      "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at LIMIT 20"
+      "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 10"
     );
-    const history = messageStmt.all(convoId);
+    const rawHistory = messageStmt.all(convoId);
+    const history = rawHistory.reverse().map((m) => ({ role: m.role, content: m.content }));
 
     // Prepare messages for Claude
     const messages = [
-      ...history.map((m) => ({ role: m.role, content: m.content })),
+      ...history,
       { role: "user", content: message },
     ];
 
     console.log(`Calling Claude with ${messages.length} messages...`);
 
-    // Call Claude API
+    // Call Claude API with shorter max tokens for quicker responses
     const response = await client.messages.create({
       model: "claude-opus-4-1",
-      max_tokens: 1024,
+      max_tokens: 500, // Reduced from 1024 to keep responses shorter
       system: FRIKKIE_SYSTEM_PROMPT,
       messages: messages,
     });
