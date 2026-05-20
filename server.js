@@ -3,15 +3,16 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import axios from "axios";
+import Database from "better-sqlite3";
 import nodemailer from "nodemailer";
-import { Database } from "better-sqlite3";
-import Database3 from "better-sqlite3";
+import bodyParser from "body-parser";
 import { v4 as uuidv4 } from "uuid";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
+app.use(bodyParser.json({ limit: "50mb" }));
 app.use(
   cors({
     origin: process.env.STORE_URL || "*",
@@ -21,53 +22,48 @@ app.use(
 
 const client = new Anthropic();
 
-// Initialize SQLite database for chat history
-const db = new Database3(process.env.DATABASE_PATH || "frikkie.db");
+// Database setup
+const DATABASE_PATH = process.env.DATABASE_PATH || "./frikkie.db";
+const db = new Database(DATABASE_PATH);
 
-// Create tables
+// Initialize database tables
 db.exec(`
   CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
-    customer_email TEXT,
-    customer_name TEXT,
+    email TEXT,
+    order_number TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    resolved INTEGER DEFAULT 0,
-    escalated INTEGER DEFAULT 0,
-    escalation_email TEXT,
-    total_cost REAL DEFAULT 0
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    status TEXT DEFAULT 'active'
   );
 
   CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
-    conversation_id TEXT,
-    sender TEXT,
-    content TEXT,
+    conversation_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
     tokens_used INTEGER,
     cost REAL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
   );
 
   CREATE TABLE IF NOT EXISTS web_searches (
     id TEXT PRIMARY KEY,
-    conversation_id TEXT,
+    conversation_id TEXT NOT NULL,
     query TEXT,
     results TEXT,
-    cost REAL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
   );
 
   CREATE TABLE IF NOT EXISTS escalations (
     id TEXT PRIMARY KEY,
-    conversation_id TEXT,
-    customer_email TEXT,
-    issue TEXT,
-    chat_history TEXT,
-    resolved_by TEXT,
-    resolved_at DATETIME,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+    conversation_id TEXT NOT NULL,
+    reason TEXT,
+    email_sent BOOLEAN DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
   );
 `);
 
@@ -85,232 +81,108 @@ const emailTransporter = nodemailer.createTransport({
   },
 });
 
-// Supplier URLs (configurable)
-const SUPPLIER_URLS = (process.env.SUPPLIER_URLS || "")
-  .split(",")
-  .filter((url) => url.trim());
+// Cost tracking constants
+const COST_PER_1K_INPUT_TOKENS = 0.003;
+const COST_PER_1K_OUTPUT_TOKENS = 0.015;
 
-// Enhanced system prompt with web search capability
-const FRIKKIE_SYSTEM_PROMPT = `You are Frikkie, a friendly and knowledgeable customer service AI assistant for a Shopify store specializing in 4x4 auxiliary lighting and outdoor gear.
+function calculateCost(inputTokens, outputTokens) {
+  const inputCost = (inputTokens / 1000) * COST_PER_1K_INPUT_TOKENS;
+  const outputCost = (outputTokens / 1000) * COST_PER_1K_OUTPUT_TOKENS;
+  return inputCost + outputCost;
+}
+
+// Frikkie's system prompt
+const FRIKKIE_SYSTEM_PROMPT = `You are Frikkie, a friendly South African customer service AI assistant for a Shopify store specializing in 4x4 auxiliary lighting and outdoor gear.
 
 **Your Personality:**
-- You're helpful, warm, and genuinely interested in solving customer problems
-- You have a South African personality - use natural, friendly language
-- You're an expert on the products you sell - know specs, compatibility, installation tips
-- You're honest - if you don't know something, say so rather than guessing
-- You can make friendly jokes and use conversational tone
-- You always put the customer's needs first
+- Helpful, warm, and genuine
+- South African expressions: "Howzit!", "Ja nee!", "Lekker!", use them naturally
+- Expert on products you sell
+- Honest - say when you don't know something
+- Friendly, conversational tone
+- References: You have 40+ years experience with 4x4s
 
 **Your Capabilities:**
-- Answer detailed product questions with specs and compatibility info
-- Look up customer orders and provide tracking information
-- Check inventory and stock status
-- Make product recommendations based on customer needs
-- Troubleshoot common issues
-- Provide installation or usage tips
-- Handle returns, exchanges, and complaints professionally
-
-**Web Search & External Resources:**
-- You have access to your product catalog first (use this whenever possible)
-- If you don't have enough info in your catalog, you can suggest searching external resources
-- NEVER search unprompted - always ask the customer first with the message:
-  "I can't find enough info on our website and database to help with this question, but I can search other resources if you would like. Should I do that?"
-- Wait for customer approval before searching
-- For product-related questions, check supplier websites first (like STEDI for lighting specs)
-- Only use general web search as a last resort
-- Always cite where info came from
-
-**Escalation Handling:**
-- If a query is complex, emotional, involves complaints, or needs human judgment, offer to escalate
-- Say something like: "This sounds important - let me make sure our team handles this properly. Can I escalate this to our support team?"
-- Be professional and empathetic when escalating
-- Summarize the key issue clearly so your team understands
+- Answer detailed product questions with specs
+- Look up customer orders and provide tracking info
+- Check product availability
+- Make recommendations
+- Troubleshoot issues
+- Provide installation tips
+- Handle complaints professionally
 
 **Important Guidelines:**
-1. Always be honest about what you know and don't know
-2. Keep responses concise but helpful
-3. If something requires human intervention, offer to escalate
-4. Be professional but never robotic
-5. Never make up product specs or pricing - use actual data only
-`;
+1. Always try to find customer orders and provide specific tracking status
+2. Reference actual product specs from the catalog
+3. Ask for order number if needed
+4. Keep responses concise but helpful
+5. Offer to escalate for complex issues (refunds, complaints)
+6. Use web search when needed - ask customer first
 
-// Helper: Make Shopify GraphQL query
-async function shopifyQuery(query, variables = {}) {
-  try {
-    const response = await axios.post(
-      `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      { query, variables },
-      {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+**Current Store:**
+- Store: ${process.env.STORE_URL}
+- Specializes in: 4x4 auxiliary lighting and outdoor gear`;
 
-    if (response.data.errors) {
-      console.error("Shopify GraphQL Error:", response.data.errors);
-      return null;
+// Shopify GraphQL Helper
+async function shopifyGraphQL(query, variables = {}) {
+  const response = await axios.post(
+    `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+    { query, variables },
+    {
+      headers: {
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "Content-Type": "application/json",
+      },
     }
-
-    return response.data.data;
-  } catch (error) {
-    console.error("Shopify API Error:", error.message);
-    return null;
-  }
+  );
+  return response.data;
 }
 
-// Web search function
-async function webSearch(query) {
-  const searchResults = [];
-  let totalCost = 0;
-
-  try {
-    // Try supplier websites first
-    for (const url of SUPPLIER_URLS) {
-      try {
-        const response = await axios.get(url, { timeout: 5000 });
-        if (response.data.includes(query)) {
-          searchResults.push({
-            source: url,
-            type: "supplier",
-            snippet: `Found on ${url}`,
-          });
-        }
-      } catch (e) {
-        // Skip if supplier site doesn't respond
-      }
-    }
-
-    // If no supplier results, use general search (via a simple approach)
-    // Note: For production, you'd use a proper search API like SerpAPI or Google Custom Search
-    if (searchResults.length === 0) {
-      // Placeholder for actual web search - would use an API in production
-      searchResults.push({
-        source: "Web Search",
-        type: "general",
-        snippet: `Search results for: ${query}`,
-      });
-      totalCost = 0.05; // Approximate cost for web search
-    }
-
-    return { results: searchResults, cost: totalCost };
-  } catch (error) {
-    console.error("Web search error:", error);
-    return { results: [], cost: 0 };
-  }
-}
-
-// Fetch all products
-async function getProductCatalog() {
-  const query = `
-    query {
-      products(first: 100) {
-        edges {
-          node {
-            id
-            title
-            handle
-            description
-            priceRange {
-              minVariantPrice {
-                amount
-              }
-              maxVariantPrice {
-                amount
-              }
-            }
-            variants(first: 10) {
-              edges {
-                node {
-                  id
-                  title
-                  price
-                  sku
-                  barcode
-                  inventoryQuantity
-                  selectedOptions {
-                    name
-                    value
-                  }
-                }
+// Get products from Shopify
+async function getProducts() {
+  const query = `{
+    products(first: 50) {
+      edges {
+        node {
+          id
+          title
+          description
+          variants(first: 10) {
+            edges {
+              node {
+                title
+                price
               }
             }
           }
         }
       }
     }
-  `;
-
-  const data = await shopifyQuery(query);
-  if (!data) return null;
-
-  return data.products.edges.map((edge) => ({
-    id: edge.node.id,
-    title: edge.node.title,
-    handle: edge.node.handle,
-    description: edge.node.description,
-    priceRange: edge.node.priceRange,
-    variants: edge.node.variants.edges.map((v) => ({
-      id: v.node.id,
-      title: v.node.title,
-      price: v.node.price,
-      sku: v.node.sku,
-      stock: v.node.inventoryQuantity,
-      options: v.node.selectedOptions,
-    })),
-  }));
+  }`;
+  const result = await shopifyGraphQL(query);
+  return result.data?.products?.edges || [];
 }
 
-// Fetch customer orders
-async function getCustomerOrders(email, orderNumber = null) {
-  if (orderNumber) {
-    const query = `
-      query {
-        orders(first: 1, query: "name:${orderNumber}") {
-          edges {
-            node {
-              id
-              name
-              orderNumber
-              createdAt
-              email
-              phone
-              totalPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              fulfillmentOrders(first: 5) {
-                edges {
-                  node {
-                    id
-                    status
-                    fulfillments(first: 1) {
-                      edges {
-                        node {
-                          id
-                          status
-                          trackingInfo {
-                            number
-                            company
-                            url
-                          }
-                          createdAt
-                        }
-                      }
-                    }
-                    lineItems(first: 10) {
-                      edges {
-                        node {
-                          id
-                          quantity
-                          lineItem {
-                            title
-                            quantity
-                          }
-                        }
+// Get order by email
+async function getOrderByEmail(email) {
+  const query = `{
+    orders(first: 10, query: "email:${email}") {
+      edges {
+        node {
+          id
+          orderNumber
+          email
+          createdAt
+          fulfillmentOrders(first: 5) {
+            edges {
+              node {
+                status
+                lineItems(first: 10) {
+                  edges {
+                    node {
+                      lineItem {
+                        title
+                        quantity
                       }
                     }
                   }
@@ -320,411 +192,199 @@ async function getCustomerOrders(email, orderNumber = null) {
           }
         }
       }
-    `;
-
-    return await shopifyQuery(query);
-  }
-
-  if (email) {
-    const query = `
-      query {
-        orders(first: 10, query: "email:${email}") {
-          edges {
-            node {
-              id
-              name
-              orderNumber
-              createdAt
-              email
-              totalPriceSet {
-                shopMoney {
-                  amount
-                  currencyCode
-                }
-              }
-              fulfillmentOrders(first: 5) {
-                edges {
-                  node {
-                    id
-                    status
-                    fulfillments(first: 1) {
-                      edges {
-                        node {
-                          id
-                          status
-                          trackingInfo {
-                            number
-                            company
-                            url
-                          }
-                          createdAt
-                        }
-                      }
-                    }
-                    lineItems(first: 10) {
-                      edges {
-                        node {
-                          id
-                          quantity
-                          lineItem {
-                            title
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    return await shopifyQuery(query);
-  }
-
-  return null;
+    }
+  }`;
+  const result = await shopifyGraphQL(query);
+  return result.data?.orders?.edges || [];
 }
 
-// Send escalation email
-async function sendEscalationEmail(
-  customerEmail,
-  customerName,
-  issue,
-  chatHistory
-) {
-  try {
-    await emailTransporter.sendMail({
-      from: process.env.GMAIL_USER,
-      to: process.env.SUPPORT_EMAIL,
-      subject: `[Frikkie Escalation] ${customerName} - ${issue.substring(0, 50)}`,
-      html: `
-        <h2>New Escalation from Frikkie</h2>
-        <p><strong>Customer:</strong> ${customerName} (${customerEmail})</p>
-        <p><strong>Issue:</strong> ${issue}</p>
-        <hr>
-        <h3>Chat History:</h3>
-        <pre>${chatHistory}</pre>
-        <hr>
-        <p>Please reply to this customer at ${customerEmail}</p>
-      `,
-    });
-
-    // Send customer confirmation
-    await emailTransporter.sendMail({
-      from: process.env.GMAIL_USER,
-      to: customerEmail,
-      subject: "We've received your support request",
-      html: `
-        <h2>Hi ${customerName},</h2>
-        <p>Thanks for reaching out! Your question has been forwarded to our support team.</p>
-        <p>We'll get back to you within 24 hours.</p>
-        <p>Best regards,<br>Frikkie & The Team</p>
-      `,
-    });
-
-    return true;
-  } catch (error) {
-    console.error("Email send error:", error);
-    return false;
-  }
-}
-
-// Calculate token cost
-function calculateTokenCost(inputTokens, outputTokens) {
-  const INPUT_COST_PER_1K = 0.003;
-  const OUTPUT_COST_PER_1K = 0.015;
-  return (inputTokens * INPUT_COST_PER_1K) / 1000 + (outputTokens * OUTPUT_COST_PER_1K) / 1000;
-}
-
-// Main chat endpoint
+// Chat endpoint
 app.post("/api/chat", async (req, res) => {
   try {
-    const { sessionId, message, customerEmail, orderNumber, approveSearch } =
-      req.body;
-
-    if (!message) {
-      return res.status(400).json({ error: "Message is required" });
-    }
+    const { message, conversationId, email, orderNumber } = req.body;
 
     // Create or get conversation
-    let conversationData = db
-      .prepare("SELECT * FROM conversations WHERE id = ?")
-      .get(sessionId);
-
-    if (!conversationData) {
-      const conversationId = sessionId;
-      db.prepare(
-        "INSERT INTO conversations (id, customer_email) VALUES (?, ?)"
-      ).run(conversationId, customerEmail || null);
-      conversationData = { id: conversationId };
+    let convoId = conversationId;
+    if (!convoId) {
+      convoId = uuidv4();
+      const stmt = db.prepare(
+        "INSERT INTO conversations (id, email, order_number) VALUES (?, ?, ?)"
+      );
+      stmt.run(convoId, email, orderNumber);
     }
 
     // Get conversation history
-    const messages = db
-      .prepare(
-        "SELECT sender, content FROM messages WHERE conversation_id = ? ORDER BY timestamp"
-      )
-      .all(sessionId)
-      .map((m) => ({ role: m.sender, content: m.content }));
+    const messageStmt = db.prepare(
+      "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at"
+    );
+    const history = messageStmt.all(convoId);
 
-    // Fetch context data
-    let contextData = "\n**Available Context:**\n";
+    // Prepare messages for Claude
+    const messages = [
+      ...history.map((m) => ({ role: m.role, content: m.content })),
+      { role: "user", content: message },
+    ];
 
-    // Get product catalog
-    const products = await getProductCatalog();
-    if (products) {
-      contextData += `\n**Product Catalog (${products.length} products):**\n`;
-      products.forEach((p) => {
-        contextData += `- ${p.title}: $${p.priceRange.minVariantPrice.amount}-$${p.priceRange.maxVariantPrice.amount}\n`;
-        contextData += `  ${p.description.substring(0, 80)}...\n`;
-      });
-    }
-
-    // Get customer orders if email provided
-    if (customerEmail || orderNumber) {
-      const orderData = await getCustomerOrders(customerEmail, orderNumber);
-      if (orderData && orderData.orders && orderData.orders.edges.length > 0) {
-        contextData += `\n**Customer Orders:**\n`;
-        orderData.orders.edges.forEach((edge) => {
-          const order = edge.node;
-          contextData += `- Order #${order.orderNumber}: $${order.totalPriceSet.shopMoney.amount}\n`;
-          if (
-            order.fulfillmentOrders.edges.length > 0 &&
-            order.fulfillmentOrders.edges[0].node.fulfillments.edges.length > 0
-          ) {
-            const tracking = order.fulfillmentOrders.edges[0].node.fulfillments.edges[0].node.trackingInfo;
-            if (tracking) {
-              contextData += `  Tracking: ${tracking.company} #${tracking.number}\n`;
-            }
-          }
-        });
-      }
-    }
-
-    // Handle web search if approved
-    let searchResults = "";
-    if (
-      approveSearch &&
-      !message.toLowerCase().includes("search") &&
-      !message.toLowerCase().includes("other resources")
-    ) {
-      const search = await webSearch(message);
-      if (search.results.length > 0) {
-        searchResults = "\n**Search Results:**\n";
-        search.results.forEach((r) => {
-          searchResults += `- ${r.source}: ${r.snippet}\n`;
-        });
-
-        // Log search
-        db.prepare(
-          "INSERT INTO web_searches (id, conversation_id, query, results, cost) VALUES (?, ?, ?, ?, ?)"
-        ).run(
-          uuidv4(),
-          sessionId,
-          message,
-          JSON.stringify(search.results),
-          search.cost
-        );
-      }
-    }
-
-    // Add user message to history
-    messages.push({ role: "user", content: message });
-
-    // Get response from Claude
+    // Call Claude API
     const response = await client.messages.create({
       model: "claude-opus-4-1",
       max_tokens: 1024,
-      system: FRIKKIE_SYSTEM_PROMPT + contextData + searchResults,
-      messages,
+      system: FRIKKIE_SYSTEM_PROMPT,
+      messages: messages,
     });
 
-    const assistantMessage = response.content[0].text;
+    const assistantMessage =
+      response.content[0].type === "text" ? response.content[0].text : "";
 
     // Calculate cost
-    const tokenCost = calculateTokenCost(
-      response.usage.input_tokens,
-      response.usage.output_tokens
-    );
+    const inputTokens = response.usage.input_tokens;
+    const outputTokens = response.usage.output_tokens;
+    const cost = calculateCost(inputTokens, outputTokens);
 
-    // Store messages in database
-    const msgId = uuidv4();
-    db.prepare(
-      "INSERT INTO messages (id, conversation_id, sender, content, tokens_used, cost) VALUES (?, ?, ?, ?, ?, ?)"
-    ).run(
-      msgId,
-      sessionId,
-      "assistant",
-      assistantMessage,
-      response.usage.output_tokens,
-      tokenCost
+    // Save messages
+    const insertMsg = db.prepare(
+      "INSERT INTO messages (id, conversation_id, role, content, tokens_used, cost, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
     );
-
-    db.prepare(
-      "INSERT INTO messages (id, conversation_id, sender, content, tokens_used, cost) VALUES (?, ?, ?, ?, ?, ?)"
-    ).run(
+    insertMsg.run(
       uuidv4(),
-      sessionId,
+      convoId,
       "user",
       message,
-      response.usage.input_tokens,
-      calculateTokenCost(response.usage.input_tokens, 0)
+      inputTokens,
+      cost,
+      new Date().toISOString()
     );
-
-    // Check if escalation is needed
-    const escalationKeywords = [
-      "escalate",
-      "complex",
-      "complaint",
-      "angry",
-      "frustrated",
-      "help",
-      "need to speak",
-    ];
-    const needsEscalation = escalationKeywords.some((keyword) =>
-      assistantMessage.toLowerCase().includes(keyword)
+    insertMsg.run(
+      uuidv4(),
+      convoId,
+      "assistant",
+      assistantMessage,
+      outputTokens,
+      cost,
+      new Date().toISOString()
     );
 
     res.json({
-      response: assistantMessage,
-      sessionId,
-      cost: tokenCost,
-      needsSearch:
-        assistantMessage.includes(
-          "I can't find enough info on our website and database"
-        ) && !approveSearch,
-      escalationSuggested: needsEscalation,
+      conversationId: convoId,
+      message: assistantMessage,
+      cost: cost,
     });
   } catch (error) {
-    console.error("Chat Error:", error);
-    res.status(500).json({
-      error: "Frikkie hit a snag! Please try again.",
-      details: error.message,
-    });
+    console.error("Chat error:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 // Escalation endpoint
 app.post("/api/escalate", async (req, res) => {
   try {
-    const { sessionId, customerEmail, customerName, issue } = req.body;
+    const { conversationId, reason, email } = req.body;
 
-    // Get chat history
-    const messages = db
-      .prepare(
-        "SELECT sender, content, timestamp FROM messages WHERE conversation_id = ? ORDER BY timestamp"
-      )
-      .all(sessionId);
-
-    const chatHistory = messages
-      .map((m) => `[${m.timestamp}] ${m.sender}: ${m.content}`)
-      .join("\n");
-
-    // Send escalation email
-    const emailSent = await sendEscalationEmail(
-      customerEmail,
-      customerName,
-      issue,
-      chatHistory
+    // Get conversation messages
+    const messageStmt = db.prepare(
+      "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at"
     );
+    const messages = messageStmt.all(conversationId);
 
-    if (emailSent) {
-      // Record escalation in database
-      db.prepare(
-        "INSERT INTO escalations (id, conversation_id, customer_email, issue, chat_history) VALUES (?, ?, ?, ?, ?)"
-      ).run(uuidv4(), sessionId, customerEmail, issue, chatHistory);
+    // Create escalation record
+    const escId = uuidv4();
+    const insertEsc = db.prepare(
+      "INSERT INTO escalations (id, conversation_id, reason) VALUES (?, ?, ?)"
+    );
+    insertEsc.run(escId, conversationId, reason);
 
-      // Update conversation
-      db.prepare(
-        "UPDATE conversations SET escalated = 1 WHERE id = ?"
-      ).run(sessionId);
+    // Send email to support
+    const chatHistory = messages
+      .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+      .join("\n\n");
 
-      res.json({
-        success: true,
-        message: `We've forwarded your question to our team. You'll hear back soon!`,
-      });
-    } else {
-      res.status(500).json({ error: "Failed to send escalation email" });
-    }
+    const mailOptions = {
+      from: process.env.GMAIL_USER,
+      to: process.env.SUPPORT_EMAIL,
+      subject: `Frikkie Escalation - ${reason}`,
+      text: `Customer escalation from: ${email}\n\nReason: ${reason}\n\nChat History:\n\n${chatHistory}`,
+    };
+
+    await emailTransporter.sendMail(mailOptions);
+
+    // Send confirmation to customer
+    const customerMail = {
+      from: process.env.GMAIL_USER,
+      to: email,
+      subject: "We've received your request",
+      text: `Hi,\n\nWe've received your escalation request and our support team will be in touch shortly.\n\nBest regards,\nFrikkie`,
+    };
+
+    await emailTransporter.sendMail(customerMail);
+
+    res.json({ success: true, escalationId: escId });
   } catch (error) {
-    console.error("Escalation Error:", error);
-    res.status(500).json({ error: "Escalation failed" });
+    console.error("Escalation error:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Admin endpoints
+// Serve frontend
+app.get("/", (req, res) => {
+  res.send("Frikkie Chat API is running!");
+});
+
+app.get("/api/products", async (req, res) => {
+  try {
+    const products = await getProducts();
+    res.json({ products });
+  } catch (error) {
+    console.error("Products error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/order/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+    const orders = await getOrderByEmail(email);
+    res.json({ orders });
+  } catch (error) {
+    console.error("Order lookup error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin dashboard data
 app.get("/api/admin/stats", (req, res) => {
   try {
-    const stats = {
-      totalConversations: db
-        .prepare("SELECT COUNT(*) as count FROM conversations")
-        .get().count,
-      totalMessages: db.prepare("SELECT COUNT(*) as count FROM messages").get()
-        .count,
-      totalCost: db
-        .prepare("SELECT SUM(cost) as total FROM messages")
-        .get().total || 0,
-      escalations: db
-        .prepare("SELECT COUNT(*) as count FROM escalations")
-        .get().count,
-      avgMessagesPerConversation: db
-        .prepare(
-          "SELECT AVG(message_count) as avg FROM (SELECT COUNT(*) as message_count FROM messages GROUP BY conversation_id)"
-        )
-        .get().avg || 0,
-    };
+    const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations");
+    const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages");
+    const totalCost = db.prepare("SELECT SUM(cost) as total FROM messages");
 
-    res.json(stats);
+    res.json({
+      conversations: convCount.get().count,
+      messages: msgCount.get().count,
+      totalCost: totalCost.get().total || 0,
+    });
   } catch (error) {
-    res.status(500).json({ error: "Failed to get stats" });
+    res.status(500).json({ error: error.message });
   }
 });
 
 app.get("/api/admin/conversations", (req, res) => {
   try {
-    const conversations = db
-      .prepare(
-        `SELECT c.*, COUNT(m.id) as message_count, SUM(m.cost) as total_cost
-       FROM conversations c
-       LEFT JOIN messages m ON c.id = m.conversation_id
-       GROUP BY c.id
-       ORDER BY c.created_at DESC
-       LIMIT 50`
-      )
-      .all();
-
-    res.json(conversations);
+    const stmt = db.prepare(`
+      SELECT c.id, c.email, c.order_number, c.created_at, COUNT(m.id) as messages
+      FROM conversations c
+      LEFT JOIN messages m ON c.id = m.conversation_id
+      GROUP BY c.id
+      ORDER BY c.created_at DESC
+      LIMIT 50
+    `);
+    const conversations = stmt.all();
+    res.json({ conversations });
   } catch (error) {
-    res.status(500).json({ error: "Failed to get conversations" });
+    res.status(500).json({ error: error.message });
   }
-});
-
-app.get("/api/admin/conversation/:id", (req, res) => {
-  try {
-    const messages = db
-      .prepare(
-        "SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp"
-      )
-      .all(req.params.id);
-
-    const conversation = db
-      .prepare("SELECT * FROM conversations WHERE id = ?")
-      .get(req.params.id);
-
-    res.json({ conversation, messages });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to get conversation" });
-  }
-});
-
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ status: "Frikkie is ready to help! 🚙" });
 });
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Frikkie's enhanced backend running on port ${PORT}`);
+  console.log(`🎩 Frikkie is running on port ${PORT}`);
 });
