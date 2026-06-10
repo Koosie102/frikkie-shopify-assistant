@@ -20,6 +20,9 @@ const client = new Anthropic();
 const DATABASE_PATH = process.env.DATABASE_PATH || "./frikkie.db";
 const db = new Database(DATABASE_PATH);
 
+// Enable foreign keys
+db.pragma("foreign_keys = ON");
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
@@ -93,11 +96,20 @@ app.post("/api/chat", async (req, res) => {
     if (!message) return res.status(400).json({ error: "Message required" });
 
     let convoId = conversationId;
-    if (!convoId) {
-      convoId = uuidv4();
-      db.prepare("INSERT INTO conversations (id, email, order_number) VALUES (?, ?, ?)").run(
-        convoId, email || "guest@example.com", orderNumber || ""
-      );
+    const ts0 = new Date().toISOString();
+
+    // Does this conversation actually exist in the DB?
+    let exists = false;
+    if (convoId) {
+      exists = !!db.prepare("SELECT id FROM conversations WHERE id = ?").get(convoId);
+    }
+
+    // Create it if there's no ID, OR if the ID is stale (DB was reset on redeploy)
+    if (!convoId || !exists) {
+      if (!convoId) convoId = uuidv4();
+      db.prepare(
+        "INSERT OR IGNORE INTO conversations (id, email, order_number, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+      ).run(convoId, email || "guest@example.com", orderNumber || "", ts0, ts0);
     }
 
     // Get last 10 messages for context
@@ -116,18 +128,36 @@ app.post("/api/chat", async (req, res) => {
 
     const assistantMessage = response.content[0].type === "text" ? response.content[0].text : "";
     const cost = calculateCost(response.usage.input_tokens, response.usage.output_tokens);
+    const timestamp = new Date().toISOString();
 
-    // Save messages
+    // Save user message
     db.prepare("INSERT INTO messages (id, conversation_id, role, content, tokens_used, cost, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-      uuidv4(), convoId, "user", message, response.usage.input_tokens, cost, new Date().toISOString()
+      uuidv4(), 
+      convoId, 
+      "user", 
+      message, 
+      response.usage.input_tokens, 
+      cost,
+      timestamp
     );
+
+    // Save assistant message
     db.prepare("INSERT INTO messages (id, conversation_id, role, content, tokens_used, cost, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-      uuidv4(), convoId, "assistant", assistantMessage, response.usage.output_tokens, cost, new Date().toISOString()
+      uuidv4(), 
+      convoId, 
+      "assistant", 
+      assistantMessage, 
+      response.usage.output_tokens, 
+      cost,
+      timestamp
     );
+
+    // Update conversation timestamp
+    db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(timestamp, convoId);
 
     res.json({ conversationId: convoId, message: assistantMessage, cost: cost });
   } catch (error) {
-    console.error("Chat error:", error);
+    console.error("Chat error:", error.message);
     res.status(500).json({ error: error.message || "Server error" });
   }
 });
@@ -142,9 +172,10 @@ app.get("/api/admin/stats", (req, res) => {
     res.json({
       conversations: convCount.count || 0,
       messages: msgCount.count || 0,
-      totalCost: totalCost.total || 0,
+      totalCost: (totalCost.total || 0).toFixed(4),
     });
   } catch (error) {
+    console.error("Stats error:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -162,6 +193,7 @@ app.get("/api/admin/conversations", (req, res) => {
     `).all();
     res.json({ conversations });
   } catch (error) {
+    console.error("Conversations error:", error);
     res.status(500).json({ error: error.message });
   }
 });
