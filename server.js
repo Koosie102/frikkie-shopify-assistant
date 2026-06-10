@@ -56,9 +56,46 @@ db.exec(`
 // SHOPIFY PRODUCT CATALOG
 // ============================================================
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE || "";          // e.g. 4x4-factory-sa.myshopify.com
-const SHOPIFY_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN || "";
-const STORE_URL = process.env.STORE_URL || `https://${SHOPIFY_STORE}`;
+const SHOP_DOMAIN = SHOPIFY_STORE.includes(".myshopify.com") ? SHOPIFY_STORE : `${SHOPIFY_STORE}.myshopify.com`;
+const SHOPIFY_CLIENT_ID = process.env.SHOPIFY_CLIENT_ID || "";
+const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET || "";
+const STORE_URL = process.env.STORE_URL || `https://${SHOP_DOMAIN}`;
 const API_VERSION = "2024-10";
+
+// Client Credentials Grant: fetch + cache a short-lived Admin API token.
+let SHOPIFY_TOKEN_CACHE = null;
+let SHOPIFY_TOKEN_EXPIRES_AT = 0;
+
+async function getShopifyToken() {
+  // Reuse cached token until ~1 min before it expires
+  if (SHOPIFY_TOKEN_CACHE && Date.now() < SHOPIFY_TOKEN_EXPIRES_AT - 60000) {
+    return SHOPIFY_TOKEN_CACHE;
+  }
+  if (!SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET || !SHOP_DOMAIN) {
+    throw new Error("Missing SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET / SHOPIFY_STORE");
+  }
+
+  const resp = await fetch(`https://${SHOP_DOMAIN}/admin/oauth/access_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: SHOPIFY_CLIENT_ID,
+      client_secret: SHOPIFY_CLIENT_SECRET,
+    }),
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Token request failed: ${resp.status} ${txt}`);
+  }
+
+  const { access_token, expires_in } = await resp.json();
+  SHOPIFY_TOKEN_CACHE = access_token;
+  SHOPIFY_TOKEN_EXPIRES_AT = Date.now() + (expires_in || 86399) * 1000;
+  console.log("🔑 Got fresh Shopify token (expires in", expires_in, "s)");
+  return SHOPIFY_TOKEN_CACHE;
+}
 
 let PRODUCT_CATALOG = [];      // full list of compact product objects
 let BRANDS = [];               // unique vendors
@@ -70,19 +107,27 @@ function stripHtml(s) {
 }
 
 async function fetchAllProducts() {
-  if (!SHOPIFY_STORE || !SHOPIFY_TOKEN) {
-    console.log("⚠️  Shopify not configured — Frikkie will have no catalog.");
+  if (!SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET || !SHOPIFY_STORE) {
+    console.log("⚠️  Shopify not configured — set SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, SHOPIFY_STORE.");
+    return;
+  }
+
+  let token;
+  try {
+    token = await getShopifyToken();
+  } catch (e) {
+    console.error("Could not get Shopify token:", e.message);
     return;
   }
 
   const products = [];
-  let url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/products.json?limit=250&status=active`;
+  let url = `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/products.json?limit=250&status=active`;
 
   try {
     while (url) {
       const resp = await fetch(url, {
         headers: {
-          "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+          "X-Shopify-Access-Token": token,
           "Content-Type": "application/json",
         },
       });
@@ -199,7 +244,14 @@ const FRIKKIE_SYSTEM = `You are Frikkie, a friendly South African 4x4 lighting e
 
 // Health check
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", catalog: PRODUCT_CATALOG.length, brands: BRANDS, loadedAt: CATALOG_LOADED_AT });
+  res.json({
+    status: "ok",
+    catalog: PRODUCT_CATALOG.length,
+    brands: BRANDS,
+    loadedAt: CATALOG_LOADED_AT,
+    shopifyConfigured: !!(SHOPIFY_CLIENT_ID && SHOPIFY_CLIENT_SECRET && SHOPIFY_STORE),
+    hasToken: !!SHOPIFY_TOKEN_CACHE,
+  });
 });
 
 app.get("/", (req, res) => {
