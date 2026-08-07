@@ -405,6 +405,31 @@ Drop into your Shopify theme.liquid before </body>
   .fq-total { font-size: 15px; font-weight: 700; color: #6B5D4F; }
   .fq-total span { font-size: 11px; font-weight: 400; color: #a09580; }
   .fq-note { font-size: 11.5px; color: #a09580; }
+  textarea.fq-input { resize: vertical; font-family: inherit; }
+
+  #frikkie-disclaimer {
+    position: absolute;
+    left: 0; right: 0; top: 56px; bottom: 0;
+    background: #fbf9f4;
+    display: none;
+    z-index: 20;
+    overflow-y: auto;
+  }
+  #frikkie-disclaimer.show { display: block; }
+  .fd-inner { padding: 22px 20px; display: flex; flex-direction: column; gap: 14px; }
+  .fd-title { font-size: 16px; font-weight: 700; color: #3a3228; }
+  .fd-text { font-size: 13px; line-height: 1.6; color: #5c5344; }
+  .fd-accept {
+    background: linear-gradient(180deg, #f5b133, #e0991f);
+    color: #241c08; border: none; font-weight: 700; font-size: 14px;
+    padding: 12px 16px; border-radius: 10px; cursor: pointer; transition: filter .15s;
+  }
+  .fd-accept:hover { filter: brightness(1.06); }
+  .fd-skip {
+    background: none; border: none; color: #a09580; font-size: 12.5px;
+    cursor: pointer; text-decoration: underline; padding: 4px;
+  }
+  .fd-skip:hover { color: #6B5D4F; }
 
   .frikkie-typing {
     display: flex;
@@ -569,6 +594,16 @@ Drop into your Shopify theme.liquid before </body>
       />
       <button class="frikkie-send-btn" id="frikkie-send-btn" onclick="frikkieSendMsg();">Send</button>
     </div>
+
+    <!-- AI disclaimer gate -->
+    <div id="frikkie-disclaimer">
+      <div class="fd-inner">
+        <div class="fd-title">Quick heads-up 👋</div>
+        <div class="fd-text">Please note that this is an AI bot called Frikkie, he can sometimes make mistakes. By using Frikkie's exceptional intellect and charm, you agree to understand that he is not human and can make mistakes. 4x4 Factory can not be held liable for these mistakes in any way.</div>
+        <button class="fd-accept" id="fd-accept">I accept</button>
+        <button class="fd-skip" id="fd-skip">Let me rather skip this</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -609,12 +644,31 @@ Drop into your Shopify theme.liquid before </body>
     }, 5000);
   }
 
+  // AI disclaimer gate
+  const DISCLAIMER_KEY = 'frikkie_disclaimer_ok';
+  function maybeShowDisclaimer() {
+    const d = document.getElementById('frikkie-disclaimer');
+    if (!d) return;
+    if (localStorage.getItem(DISCLAIMER_KEY) === '1') d.classList.remove('show');
+    else d.classList.add('show');
+  }
+  document.getElementById('fd-accept').addEventListener('click', () => {
+    localStorage.setItem(DISCLAIMER_KEY, '1');
+    document.getElementById('frikkie-disclaimer').classList.remove('show');
+    setTimeout(() => document.getElementById('frikkie-input').focus(), 100);
+  });
+  document.getElementById('fd-skip').addEventListener('click', () => {
+    document.getElementById('frikkie-disclaimer').classList.remove('show');
+    frikkieClosedChat();
+  });
+
   // Click interaction - open chat
   document.getElementById('frikkie-character').addEventListener('click', () => {
     const chat = document.getElementById('frikkie-chat-window');
     chat.classList.toggle('open');
 
     if (chat.classList.contains('open')) {
+      maybeShowDisclaimer();
       setTimeout(() => document.getElementById('frikkie-input').focus(), 300);
       showSpeech("Let's chat!");
       document.getElementById('frikkie-close-x').classList.add('show');
@@ -860,33 +914,35 @@ Drop into your Shopify theme.liquid before </body>
     const c = wrap.querySelector('.frikkie-msg-content');
     c.innerHTML =
       '<div class="frikkie-quote-form">' +
-      '<div class="fq-title">Almost there — where should we send it?</div>' +
+      '<div class="fq-title">Almost there — a few details for your quote:</div>' +
       '<input class="fq-input" id="fq-name" placeholder="Your name" />' +
       '<input class="fq-input" id="fq-email" placeholder="Your email" type="email" />' +
+      '<textarea class="fq-input" id="fq-address" placeholder="Delivery address (optional)" rows="2"></textarea>' +
       '<button class="frikkie-quote-btn" id="fq-go">Generate quote</button>' +
       '</div>';
     const go = c.querySelector('#fq-go');
-    go.addEventListener('click', () => generateQuote(wrap, c.querySelector('#fq-name').value, c.querySelector('#fq-email').value));
+    go.addEventListener('click', () => generateQuote(wrap, c.querySelector('#fq-name').value, c.querySelector('#fq-email').value, c.querySelector('#fq-address').value));
   }
 
-  async function generateQuote(wrap, name, email) {
+  async function generateQuote(wrap, name, email, address) {
     const c = wrap.querySelector('.frikkie-msg-content');
     c.innerHTML = '<div class="frikkie-quote-form"><div class="fq-title">Sorting out your quote… 📝</div></div>';
     try {
       const r = await fetch(API + '/api/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversationId: frikkieConvoId, name: name || '', email: email || '' })
+        body: JSON.stringify({ conversationId: frikkieConvoId, name: name || '', email: email || '', address: address || '' })
       });
       const data = await r.json();
       if (data.ok) {
         const url = API + data.pdfUrl;
+        const sent = data.emailedCustomer ? 'We\'ve emailed you a copy too. ' : '';
         c.innerHTML =
           '<div class="frikkie-quote-done">' +
           '<div class="fq-title">Quote ' + escapeHtml(data.number) + ' is ready! 🎉</div>' +
           '<div class="fq-total">Total: R' + Number(data.total).toLocaleString('en-ZA') + ' <span>(incl. shipping)</span></div>' +
           '<a class="frikkie-quote-btn" href="' + escapeAttr(url) + '" target="_blank" rel="noopener">⬇ Download PDF</a>' +
-          '<div class="fq-note">This is an AI estimate. For a full official quote, email sales@4x4factory.co.za with your items.</div>' +
+          '<div class="fq-note">' + sent + 'This is an AI estimate. For a full official quote, email sales@4x4factory.co.za with your items.</div>' +
           '</div>';
       } else {
         c.innerHTML = '<div class="frikkie-quote-form"><div class="fq-title">' + escapeHtml(data.message || "I couldn't build that quote — tell me the exact items and quantities and I'll try again.") + '</div></div>';

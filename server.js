@@ -371,7 +371,7 @@ async function extractQuoteItems(convoId) {
 }
 
 // Build a professional quote PDF, return the filename
-function buildQuotePdf({ number, name, email, lines, subtotal, shipping, total }) {
+function buildQuotePdf({ number, name, email, address, lines, subtotal, shipping, total }) {
   return new Promise((resolve, reject) => {
     const file = `${number}.pdf`;
     const path = join(QUOTES_DIR, file);
@@ -400,7 +400,9 @@ function buildQuotePdf({ number, name, email, lines, subtotal, shipping, total }
     doc.moveTo(50, 130).lineTo(545, 130).strokeColor(line).stroke();
     doc.fillColor(khaki).fontSize(10).font("Helvetica-Bold").text("PREPARED FOR", 50, 142);
     doc.fillColor("#222").font("Helvetica").fontSize(11).text(name || "Customer", 50, 158);
-    if (email) doc.fillColor(grey).fontSize(10).text(email, 50, 173);
+    let byY = 173;
+    if (email) { doc.fillColor(grey).fontSize(10).text(email, 50, byY); byY += 14; }
+    if (address) { doc.fillColor(grey).fontSize(10).text(address, 50, byY, { width: 280 }); }
 
     // Table header
     let y = 210;
@@ -541,13 +543,14 @@ app.post("/api/chat", async (req, res) => {
 // ============================================================
 app.post("/api/quote", async (req, res) => {
   try {
-    const { conversationId, name, email } = req.body;
+    const { conversationId, name, email, address } = req.body;
     if (!conversationId) return res.status(400).json({ error: "conversationId required" });
 
     // Pull details from the conversation record if not supplied
     const convo = db.prepare("SELECT name, email FROM conversations WHERE id = ?").get(conversationId) || {};
     const custName = (name && name.trim()) || convo.name || "Customer";
     const custEmail = (email && email.trim()) || (convo.email && !GUEST_EMAILS.includes(convo.email) ? convo.email : "");
+    const custAddress = (address && address.trim()) || "";
 
     // Extract items and price them from the live catalog
     const raw = await extractQuoteItems(conversationId);
@@ -563,13 +566,36 @@ app.post("/api/quote", async (req, res) => {
     const total = subtotal + shipping;
 
     const number = "Q-" + new Date().toISOString().slice(0, 10).replace(/-/g, "") + "-" + Math.random().toString(36).slice(2, 6).toUpperCase();
-    const file = await buildQuotePdf({ number, name: custName, email: custEmail, lines, subtotal, shipping, total });
+    const file = await buildQuotePdf({ number, name: custName, email: custEmail, address: custAddress, lines, subtotal, shipping, total });
 
     // Record it
     db.prepare("INSERT INTO quotes (id, number, conversation_id, name, email, subtotal, shipping, total, items_json, pdf_file, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(uuidv4(), number, conversationId, custName, custEmail, subtotal, shipping, total, JSON.stringify(lines), file, new Date().toISOString());
 
-    res.json({ ok: true, number, total, subtotal, shipping, pdfUrl: `/quotes/${file}`, itemsCount: lines.length });
+    // Email the PDF: always to the team, and to the customer if we have their address
+    const itemRows = lines.map((l) => `${l.qty} x ${l.title} — ${l.price != null ? "R" + l.price.toLocaleString("en-ZA") : "POA"}`).join("\n");
+    const teamEmail = process.env.DAILY_SUMMARY_EMAIL || process.env.SUPPORT_EMAIL || MAIL_FROM;
+    const attachment = { filename: `${number}.pdf`, path: join(QUOTES_DIR, file) };
+    let emailedCustomer = false;
+    try {
+      await emailTransporter.sendMail({
+        from: MAIL_FROM, to: teamEmail,
+        subject: `New quote ${number} — ${custName} (R${total.toLocaleString("en-ZA")})`,
+        text: `Frikkie generated a quote from a chat.\n\nCustomer: ${custName}${custEmail ? " <" + custEmail + ">" : ""}\n${custAddress ? "Address: " + custAddress + "\n" : ""}\n${itemRows}\n\nSubtotal: R${subtotal.toLocaleString("en-ZA")}\nShipping: R${shipping.toLocaleString("en-ZA")}\nTotal: R${total.toLocaleString("en-ZA")}\n\nPDF attached.`,
+        attachments: [attachment],
+      });
+      if (custEmail) {
+        await emailTransporter.sendMail({
+          from: MAIL_FROM, to: custEmail,
+          subject: `Your 4x4 Factory SA quote ${number}`,
+          text: `Hi ${custName},\n\nThanks for chatting with Frikkie! Your quote (${number}) is attached as a PDF.\n\nTotal: R${total.toLocaleString("en-ZA")} (incl. estimated shipping)\n\nThis is an AI-generated estimate. For a full official quote, reply to this email or contact sales@4x4factory.co.za.\n\nKind regards,\n4x4 Factory SA`,
+          attachments: [attachment],
+        });
+        emailedCustomer = true;
+      }
+    } catch (e) { console.error("Quote email failed:", e.message); }
+
+    res.json({ ok: true, number, total, subtotal, shipping, pdfUrl: `/quotes/${file}`, itemsCount: lines.length, emailedCustomer });
   } catch (error) {
     console.error("Quote error:", error.message);
     res.status(500).json({ error: error.message });
