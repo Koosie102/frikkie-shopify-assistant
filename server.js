@@ -229,8 +229,8 @@ const emailTransporter = nodemailer.createTransport({
   auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASSWORD },
 });
 
-const COST_PER_1K_INPUT = 0.003;
-const COST_PER_1K_OUTPUT = 0.015;
+const COST_PER_1K_INPUT = 0.002;
+const COST_PER_1K_OUTPUT = 0.010;
 function calculateCost(i, o) { return (i / 1000) * COST_PER_1K_INPUT + (o / 1000) * COST_PER_1K_OUTPUT; }
 
 const FRIKKIE_SYSTEM = `You are Frikkie, a friendly South African 4x4 lighting expert for 4x4 Factory SA.
@@ -294,8 +294,9 @@ app.post("/api/chat", async (req, res) => {
     const messages = [...history, { role: "user", content: message }];
     const systemPrompt = FRIKKIE_SYSTEM + buildCatalogContext(message);
 
-    const response = await client.messages.create({ model: "claude-sonnet-5", max_tokens: 500, system: systemPrompt, messages });
-    const assistantMessage = response.content[0].type === "text" ? response.content[0].text : "";
+    const response = await client.messages.create({ model: "claude-sonnet-5", max_tokens: 1024, system: systemPrompt, messages });
+    let assistantMessage = (response.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+    if (!assistantMessage) assistantMessage = "Ag sorry, boet — I didn't quite catch that one. Mind asking again?";
     const cost = calculateCost(response.usage.input_tokens, response.usage.output_tokens);
     const ts = new Date().toISOString();
 
@@ -490,7 +491,7 @@ async function buildAndSendSummary() {
         system: "You are Frikkie summarising the day's customer chats for the shop owner. Write a short, friendly plain-text daily briefing (5-8 sentences max). Call out anything that needs the owner to follow up, any quote requests, and any products customers were keen on. Be specific but concise. No markdown.",
         messages: [{ role: "user", content: `Here are today's conversations:\n\n${parts.join("\n\n---\n\n")}` }],
       });
-      aiSummary = resp.content[0].type === "text" ? resp.content[0].text : "";
+      aiSummary = (resp.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
     }
   } catch (e) { console.error("AI summary failed:", e.message); }
 
