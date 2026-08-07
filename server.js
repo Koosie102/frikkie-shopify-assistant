@@ -262,9 +262,27 @@ function productsFromReply(replyText) {
 // ============================================================
 // EMAIL
 // ============================================================
-const emailTransporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASSWORD },
+// Prefer real domain SMTP (cPanel mailbox) so mail authenticates and lands.
+// Falls back to Gmail only if SMTP_HOST isn't set.
+const SMTP_HOST = process.env.SMTP_HOST || "";
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || "465", 10);
+const MAIL_FROM = process.env.MAIL_FROM || process.env.SMTP_USER || process.env.GMAIL_USER || "frikkie@4x4factory.co.za";
+
+const emailTransporter = SMTP_HOST
+  ? nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_PORT === 465, // 465 = SSL, 587 = STARTTLS
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    })
+  : nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASSWORD },
+    });
+
+emailTransporter.verify((err) => {
+  if (err) console.error("Mail transport not ready:", err.message);
+  else console.log(`Mail ready via ${SMTP_HOST ? "SMTP " + SMTP_HOST + ":" + SMTP_PORT : "Gmail"} as ${MAIL_FROM}`);
 });
 
 const COST_PER_1K_INPUT = 0.002;
@@ -291,19 +309,23 @@ function shippingForSubtotal(subtotal) {
 const QUOTES_DIR = join(dirname(DATABASE_PATH.startsWith("/") ? DATABASE_PATH : join(__dirname, DATABASE_PATH)), "quotes");
 try { fs.mkdirSync(QUOTES_DIR, { recursive: true }); } catch {}
 
-// Company logo for the quote PDF — downloaded once from a URL (override with QUOTE_LOGO_URL)
+// Company logo for the quote PDF — downloaded from QUOTE_LOGO_URL, re-fetched whenever that URL changes
 const QUOTE_LOGO_URL = process.env.QUOTE_LOGO_URL || "https://cdn.shopify.com/s/files/1/0539/2878/8145/collections/400PngdpiLogoCroppedBW.png";
 const LOGO_PATH = join(QUOTES_DIR, "logo.png");
+const LOGO_URL_MARKER = join(QUOTES_DIR, "logo.url");
 async function ensureLogo() {
-  if (fs.existsSync(LOGO_PATH)) return LOGO_PATH;
   if (!QUOTE_LOGO_URL) return null;
   try {
+    // If we already cached this exact URL, keep it; otherwise (new/changed URL) re-download.
+    const cachedUrl = fs.existsSync(LOGO_URL_MARKER) ? fs.readFileSync(LOGO_URL_MARKER, "utf8").trim() : "";
+    if (fs.existsSync(LOGO_PATH) && cachedUrl === QUOTE_LOGO_URL) return LOGO_PATH;
     const r = await fetch(QUOTE_LOGO_URL);
-    if (!r.ok) { console.error("Logo fetch failed:", r.status); return null; }
+    if (!r.ok) { console.error("Logo fetch failed:", r.status); return fs.existsSync(LOGO_PATH) ? LOGO_PATH : null; }
     fs.writeFileSync(LOGO_PATH, Buffer.from(await r.arrayBuffer()));
-    console.log("Quote logo cached");
+    fs.writeFileSync(LOGO_URL_MARKER, QUOTE_LOGO_URL);
+    console.log("Quote logo cached/updated from", QUOTE_LOGO_URL);
     return LOGO_PATH;
-  } catch (e) { console.error("Logo fetch error:", e.message); return null; }
+  } catch (e) { console.error("Logo fetch error:", e.message); return fs.existsSync(LOGO_PATH) ? LOGO_PATH : null; }
 }
 
 function fuzzyMatchProduct(title) {
@@ -728,8 +750,8 @@ app.post("/api/escalate", async (req, res) => {
     const chatHistory = messages.map((mm) => `${mm.role.toUpperCase()}: ${mm.content}`).join("\n\n");
     const escId = uuidv4();
     db.prepare("INSERT INTO escalations (id, conversation_id, reason) VALUES (?, ?, ?)").run(escId, conversationId, reason);
-    await emailTransporter.sendMail({ from: process.env.GMAIL_USER, to: process.env.SUPPORT_EMAIL, subject: `Frikkie Escalation - ${reason}`, text: `Customer: ${email}\n\nReason: ${reason}\n\nChat:\n\n${chatHistory}` });
-    if (email) await emailTransporter.sendMail({ from: process.env.GMAIL_USER, to: email, subject: "We've received your request", text: `Hi,\n\nWe've received your request and our team will be in touch shortly.\n\nBest,\nFrikkie` });
+    await emailTransporter.sendMail({ from: MAIL_FROM, to: process.env.SUPPORT_EMAIL, subject: `Frikkie Escalation - ${reason}`, text: `Customer: ${email}\n\nReason: ${reason}\n\nChat:\n\n${chatHistory}` });
+    if (email) await emailTransporter.sendMail({ from: MAIL_FROM, to: email, subject: "We've received your request", text: `Hi,\n\nWe've received your request and our team will be in touch shortly.\n\nBest,\nFrikkie` });
     res.json({ success: true, escalationId: escId });
   } catch (error) { console.error("Escalation error:", error); res.status(500).json({ error: error.message }); }
 });
@@ -738,7 +760,7 @@ app.post("/api/escalate", async (req, res) => {
 // DAILY SUMMARY
 // ============================================================
 const DAILY_SUMMARY_HOUR = parseInt(process.env.DAILY_SUMMARY_HOUR || "17", 10); // hour in SAST (UTC+2)
-const SUMMARY_EMAIL = process.env.DAILY_SUMMARY_EMAIL || process.env.SUPPORT_EMAIL || process.env.GMAIL_USER;
+const SUMMARY_EMAIL = process.env.DAILY_SUMMARY_EMAIL || process.env.SUPPORT_EMAIL || MAIL_FROM;
 const DASHBOARD_URL = process.env.DASHBOARD_URL || "https://frikkie-shopify-assistant-production.up.railway.app/";
 
 function esc(s) { return (s == null ? "" : String(s)).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
@@ -808,7 +830,7 @@ async function buildAndSendSummary() {
   </div>`;
 
   await emailTransporter.sendMail({
-    from: process.env.GMAIL_USER,
+    from: MAIL_FROM,
     to: SUMMARY_EMAIL,
     subject: `Frikkie Daily Briefing — ${dateStr} (${needsResponse.length} need a reply)`,
     html,
