@@ -886,7 +886,7 @@ Drop into your Shopify theme.liquid before </body>
           '<div class="fq-title">Quote ' + escapeHtml(data.number) + ' is ready! 🎉</div>' +
           '<div class="fq-total">Total: R' + Number(data.total).toLocaleString('en-ZA') + ' <span>(incl. shipping)</span></div>' +
           '<a class="frikkie-quote-btn" href="' + escapeAttr(url) + '" target="_blank" rel="noopener">⬇ Download PDF</a>' +
-          '<div class="fq-note">Our team has a copy too — we\'ll follow up if you need anything.</div>' +
+          '<div class="fq-note">This is an AI estimate. For a full official quote, email sales@4x4factory.co.za with your items.</div>' +
           '</div>';
       } else {
         c.innerHTML = '<div class="frikkie-quote-form"><div class="fq-title">' + escapeHtml(data.message || "I couldn't build that quote — tell me the exact items and quantities and I'll try again.") + '</div></div>';
