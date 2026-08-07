@@ -146,6 +146,7 @@
     <button class="tab active" data-view="overview">Overview</button>
     <button class="tab" data-view="chats">Conversations <span id="chatsTabCnt" class="tabcnt" style="display:none"></span></button>
     <button class="tab" data-view="customers">Customers</button>
+    <button class="tab" data-view="quotes">Quotes</button>
     <button class="tab" data-view="knowledge">Knowledge</button>
     <button class="tab" data-view="status">Status</button>
     <button class="tab" data-view="settings">Settings</button>
@@ -190,6 +191,14 @@
         <div class="right"><a class="btn beam" href="/api/admin/customers.csv">⬇ Export CSV</a></div>
       </div>
       <div id="custWrap"><div class="skel">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- QUOTES -->
+  <section class="view" id="view-quotes">
+    <div class="panel">
+      <div class="panel-h"><h2>Quotes generated</h2><div class="right"><span class="muted" id="quoteCount"></span></div></div>
+      <div id="quotesWrap"><div class="skel">Loading…</div></div>
     </div>
   </section>
 
@@ -281,6 +290,7 @@ function go(v,filter){
   document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active',s.id==='view-'+v));
   if(v==='chats'){ if(filter!==undefined){chatFilter=filter;syncChips();} loadChats(); }
   if(v==='customers')loadCustomers();
+  if(v==='quotes')loadQuotes();
   if(v==='knowledge')loadKnowledge();
   if(v==='status')loadStatus();
   if(v==='settings')loadSettings();
@@ -481,6 +491,26 @@ $('#sendSummary').addEventListener('click',async e=>{const b=e.target;b.disabled
 async function loadSettings(){try{const s=await api('/api/admin/settings');$('#avatarUrl').value=s.avatarUrl||'';$('#greeting').value=s.greeting||'';$('#avatarPrev').src=s.avatarUrl||'';}catch(e){}}
 $('#avatarUrl')&&$('#avatarUrl').addEventListener('input',e=>{$('#avatarPrev').src=e.target.value;});
 $('#saveSettings').addEventListener('click',async()=>{try{const body={avatarUrl:$('#avatarUrl').value,greeting:$('#greeting').value};await api('/api/admin/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast('Saved');if(body.avatarUrl)$('#hdrAvatar').src=body.avatarUrl;}catch(e){toast('Save failed',true);}});
+
+/* ---------- Quotes ---------- */
+async function loadQuotes(){
+  try{
+    const {quotes}=await api('/api/admin/quotes');
+    $('#quoteCount').textContent=quotes.length?(quotes.length+' total'):'';
+    const el=$('#quotesWrap');
+    if(!quotes.length){el.innerHTML='<div class="empty"><div class="big">No quotes yet</div>When Frikkie builds a quote for a customer, it shows here with a download link.</div>';return;}
+    let h='<table><thead><tr><th>Quote</th><th>Customer</th><th>Total</th><th>When</th><th></th></tr></thead><tbody>';
+    for(const q of quotes){
+      const mail=q.email?('<div class="email">'+esc(q.email)+'</div>'):'';
+      h+='<tr class="row"><td><span class="pill-count">'+esc(q.number)+'</span></td>'
+        +'<td>'+(q.name?esc(q.name):'<span class="muted">—</span>')+mail+'</td>'
+        +'<td><b>R'+Number(q.total||0).toLocaleString("en-ZA")+'</b></td>'
+        +'<td><span class="muted">'+timeAgo(q.created_at)+'</span></td>'
+        +'<td><a class="btn ghost sm" href="/quotes/'+esc(q.pdf_file)+'" target="_blank">⬇ PDF</a></td></tr>';
+    }
+    h+='</tbody></table>';el.innerHTML=h;
+  }catch(e){$('#quotesWrap').innerHTML='<div class="empty">Could not load quotes.</div>';}
+}
 
 /* ---------- Knowledge / Teach Frikkie ---------- */
 async function loadKnowledge(){

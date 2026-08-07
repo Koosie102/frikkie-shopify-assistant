@@ -8,6 +8,8 @@ import bodyParser from "body-parser";
 import { v4 as uuidv4 } from "uuid";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import fs from "fs";
+import PDFDocument from "pdfkit";
 
 dotenv.config();
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -64,6 +66,20 @@ db.exec(`
     active INTEGER DEFAULT 1,
     source TEXT DEFAULT 'manual',
     conversation_id TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS quotes (
+    id TEXT PRIMARY KEY,
+    number TEXT,
+    conversation_id TEXT,
+    name TEXT,
+    email TEXT,
+    subtotal REAL,
+    shipping REAL,
+    total REAL,
+    items_json TEXT,
+    pdf_file TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
@@ -255,6 +271,139 @@ const COST_PER_1K_INPUT = 0.002;
 const COST_PER_1K_OUTPUT = 0.010;
 function calculateCost(i, o) { return (i / 1000) * COST_PER_1K_INPUT + (o / 1000) * COST_PER_1K_OUTPUT; }
 
+// ============================================================
+// QUOTE ENGINE
+// ============================================================
+// Live shipping tiers pulled from Shopify (South Africa, TOTAL_PRICE based)
+const SHIPPING_TIERS = [
+  { min: 0, max: 5000, price: 115 },
+  { min: 5000, max: 15000, price: 180 },
+  { min: 15000, max: 23000, price: 220 },
+  { min: 23000, max: 50000, price: 300 },
+  { min: 50000, max: 100000, price: 550 },
+  { min: 100000, max: 300000, price: 1000 },
+  { min: 300000, max: Infinity, price: 1500 },
+];
+function shippingForSubtotal(subtotal) {
+  const t = SHIPPING_TIERS.find((t) => subtotal >= t.min && subtotal < t.max) || SHIPPING_TIERS[SHIPPING_TIERS.length - 1];
+  return t.price;
+}
+const QUOTES_DIR = join(dirname(DATABASE_PATH.startsWith("/") ? DATABASE_PATH : join(__dirname, DATABASE_PATH)), "quotes");
+try { fs.mkdirSync(QUOTES_DIR, { recursive: true }); } catch {}
+
+function fuzzyMatchProduct(title) {
+  if (!PRODUCT_CATALOG.length || !title) return null;
+  const t = title.toLowerCase().trim();
+  let p = PRODUCT_CATALOG.find((x) => x.title.toLowerCase() === t);
+  if (p) return p;
+  p = PRODUCT_CATALOG.find((x) => x.title.toLowerCase().includes(t) || t.includes(x.title.toLowerCase()));
+  if (p) return p;
+  const words = t.split(/\s+/).filter((w) => w.length >= 3);
+  let best = null, bestScore = 0;
+  for (const x of PRODUCT_CATALOG) {
+    const hay = x.title.toLowerCase();
+    let score = 0;
+    for (const w of words) if (hay.includes(w)) score++;
+    if (score > bestScore) { bestScore = score; best = x; }
+  }
+  return bestScore >= 2 ? best : null;
+}
+
+// Ask Claude to pull the quote line items out of the conversation
+async function extractQuoteItems(convoId) {
+  const msgs = db.prepare("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at").all(convoId);
+  if (!msgs.length) return [];
+  const transcript = msgs.map((m) => `${m.role === "user" ? "Customer" : "Frikkie"}: ${m.content}`).join("\n");
+  try {
+    const resp = await client.messages.create({
+      model: "claude-sonnet-5",
+      max_tokens: 500,
+      system: "Extract the products the customer wants quoted from this chat. Return ONLY a JSON array, no prose, of objects: {\"title\": string, \"qty\": number}. Use the product name as mentioned. If quantity isn't stated, use 1. If no products are being quoted, return [].",
+      messages: [{ role: "user", content: transcript }],
+    });
+    const text = (resp.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+    const jsonStart = text.indexOf("[");
+    const jsonEnd = text.lastIndexOf("]");
+    if (jsonStart === -1 || jsonEnd === -1) return [];
+    const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    console.error("extractQuoteItems failed:", e.message);
+    return [];
+  }
+}
+
+// Build a professional quote PDF, return the filename
+function buildQuotePdf({ number, name, email, lines, subtotal, shipping, total }) {
+  return new Promise((resolve, reject) => {
+    const file = `${number}.pdf`;
+    const path = join(QUOTES_DIR, file);
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const stream = fs.createWriteStream(path);
+    doc.pipe(stream);
+
+    const khaki = "#574b33", amber = "#e0991f", grey = "#666666", line = "#dddddd";
+    // Header
+    doc.fillColor(khaki).fontSize(22).font("Helvetica-Bold").text("4x4 FACTORY SA", 50, 50);
+    doc.fillColor(grey).fontSize(9).font("Helvetica")
+      .text("www.4x4factory.co.za  |  sales@4x4factory.co.za", 50, 76);
+    doc.fillColor(khaki).fontSize(18).font("Helvetica-Bold").text("QUOTE", 400, 50, { align: "right" });
+    doc.fillColor(grey).fontSize(10).font("Helvetica")
+      .text(`No: ${number}`, 400, 76, { align: "right" })
+      .text(`Date: ${new Date().toLocaleDateString("en-ZA", { day: "2-digit", month: "short", year: "numeric" })}`, 400, 90, { align: "right" })
+      .text("Valid: 14 days", 400, 104, { align: "right" });
+
+    // Bill to
+    doc.moveTo(50, 130).lineTo(545, 130).strokeColor(line).stroke();
+    doc.fillColor(khaki).fontSize(10).font("Helvetica-Bold").text("PREPARED FOR", 50, 142);
+    doc.fillColor("#222").font("Helvetica").fontSize(11).text(name || "Customer", 50, 158);
+    if (email) doc.fillColor(grey).fontSize(10).text(email, 50, 173);
+
+    // Table header
+    let y = 210;
+    doc.fillColor(khaki).fontSize(9).font("Helvetica-Bold");
+    doc.text("ITEM", 50, y).text("QTY", 350, y, { width: 40, align: "right" })
+      .text("UNIT", 400, y, { width: 65, align: "right" }).text("TOTAL", 480, y, { width: 65, align: "right" });
+    y += 8; doc.moveTo(50, y + 6).lineTo(545, y + 6).strokeColor(line).stroke(); y += 16;
+
+    doc.font("Helvetica").fontSize(10).fillColor("#222");
+    for (const l of lines) {
+      const unit = l.price != null ? `R${Number(l.price).toLocaleString("en-ZA")}` : "POA";
+      const lineTotal = l.price != null ? `R${(l.price * l.qty).toLocaleString("en-ZA")}` : "POA";
+      const titleHeight = doc.heightOfString(l.title, { width: 290 });
+      doc.fillColor("#222").text(l.title, 50, y, { width: 290 });
+      doc.text(String(l.qty), 350, y, { width: 40, align: "right" });
+      doc.text(unit, 400, y, { width: 65, align: "right" });
+      doc.text(lineTotal, 480, y, { width: 65, align: "right" });
+      y += Math.max(titleHeight, 14) + 8;
+      if (y > 700) { doc.addPage(); y = 60; }
+    }
+
+    // Totals
+    doc.moveTo(350, y).lineTo(545, y).strokeColor(line).stroke(); y += 12;
+    const rightRow = (label, val, bold) => {
+      doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(bold ? 12 : 10).fillColor(bold ? khaki : "#222");
+      doc.text(label, 350, y, { width: 110, align: "right" });
+      doc.text(val, 470, y, { width: 75, align: "right" });
+      y += bold ? 20 : 16;
+    };
+    rightRow("Subtotal", `R${subtotal.toLocaleString("en-ZA")}`);
+    rightRow("Shipping", `R${shipping.toLocaleString("en-ZA")}`);
+    rightRow("TOTAL", `R${total.toLocaleString("en-ZA")}`, true);
+
+    // Footer notes
+    y += 14;
+    doc.font("Helvetica").fontSize(8.5).fillColor(grey)
+      .text("Prices include VAT and are in ZAR. Shipping estimated from order value; final rate confirmed at checkout. Typical lead time 0–3 weeks, stock dependent. Items marked POA to be confirmed by our team.", 50, y, { width: 495 });
+    doc.moveTo(50, y + 44).lineTo(545, y + 44).strokeColor(line).stroke();
+    doc.fillColor(amber).fontSize(10).font("Helvetica-Bold").text("Thanks for shopping with 4x4 Factory SA!", 50, y + 54);
+
+    doc.end();
+    stream.on("finish", () => resolve(file));
+    stream.on("error", reject);
+  });
+}
+
 const FRIKKIE_SYSTEM = `You are Frikkie, a friendly South African 4x4 lighting expert for 4x4 Factory SA.
 
 **Keep it SHORT - 2-3 sentences max!**
@@ -263,6 +412,7 @@ const FRIKKIE_SYSTEM = `You are Frikkie, a friendly South African 4x4 lighting e
 - When you recommend a specific product, include its full store link so the customer can click through.
 - Never invent products, prices, or brands. If something isn't in the store knowledge, say you're not certain and offer to check.
 - If a SHOP CORRECTIONS & HOUSE RULES section is present below, treat it as authoritative — it reflects how this shop actually talks about its products and overrides your general assumptions.
+- When the customer seems to be building an order or asking about prices for specific items they want (a quote situation), offer to put together a formal quote for them. To do this, end your message with the exact marker [[OFFER_QUOTE]] on its own — the app turns it into a "Get a quote" button, so don't describe the button, just offer naturally and add the marker. Only add it when there are actual products on the table.
 - Early on, in a natural friendly way, ask the customer's first name so you can chat properly.
 - If they want a quote, a stock check, or someone to follow up with them, ask for their email address so the team can get back to them.`;
 
@@ -322,6 +472,8 @@ app.post("/api/chat", async (req, res) => {
     if (!assistantMessage) assistantMessage = "Ag sorry, boet — I didn't quite catch that one. Mind asking again?";
     const cost = calculateCost(response.usage.input_tokens, response.usage.output_tokens);
     const ts = new Date().toISOString();
+    const offerQuote = /\[\[OFFER_QUOTE\]\]/.test(assistantMessage);
+    assistantMessage = assistantMessage.replace(/\[\[OFFER_QUOTE\]\]/g, "").trim();
 
     db.prepare("INSERT INTO messages (id, conversation_id, role, content, tokens_used, cost, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(uuidv4(), convoId, "user", message, response.usage.input_tokens, cost, ts);
@@ -331,12 +483,74 @@ app.post("/api/chat", async (req, res) => {
     db.prepare("UPDATE conversations SET updated_at = ?, read = 0, responded = 0 WHERE id = ?").run(ts, convoId);
 
     const products = productsFromReply(assistantMessage);
-    res.json({ conversationId: convoId, message: assistantMessage, cost, products });
+    res.json({ conversationId: convoId, message: assistantMessage, cost, products, offerQuote });
   } catch (error) {
     console.error("Chat error:", error.message);
     res.status(500).json({ error: error.message || "Server error" });
   }
 });
+
+// ============================================================
+// QUOTES
+// ============================================================
+app.post("/api/quote", async (req, res) => {
+  try {
+    const { conversationId, name, email } = req.body;
+    if (!conversationId) return res.status(400).json({ error: "conversationId required" });
+
+    // Pull details from the conversation record if not supplied
+    const convo = db.prepare("SELECT name, email FROM conversations WHERE id = ?").get(conversationId) || {};
+    const custName = (name && name.trim()) || convo.name || "Customer";
+    const custEmail = (email && email.trim()) || (convo.email && !GUEST_EMAILS.includes(convo.email) ? convo.email : "");
+
+    // Extract items and price them from the live catalog
+    const raw = await extractQuoteItems(conversationId);
+    if (!raw.length) return res.json({ ok: false, reason: "no_items", message: "I couldn't spot specific products to quote yet — tell me which items and quantities you want." });
+
+    const lines = raw.map((it) => {
+      const qty = Math.max(1, parseInt(it.qty, 10) || 1);
+      const match = fuzzyMatchProduct(it.title);
+      return { title: match ? match.title : it.title, qty, price: match ? match.price : null };
+    });
+    const subtotal = lines.reduce((s, l) => s + (l.price != null ? l.price * l.qty : 0), 0);
+    const shipping = shippingForSubtotal(subtotal);
+    const total = subtotal + shipping;
+
+    const number = "Q-" + new Date().toISOString().slice(0, 10).replace(/-/g, "") + "-" + Math.random().toString(36).slice(2, 6).toUpperCase();
+    const file = await buildQuotePdf({ number, name: custName, email: custEmail, lines, subtotal, shipping, total });
+
+    // Record it
+    db.prepare("INSERT INTO quotes (id, number, conversation_id, name, email, subtotal, shipping, total, items_json, pdf_file, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(uuidv4(), number, conversationId, custName, custEmail, subtotal, shipping, total, JSON.stringify(lines), file, new Date().toISOString());
+
+    // Email the team (sales@) with the PDF attached
+    const itemRows = lines.map((l) => `${l.qty} x ${l.title} — ${l.price != null ? "R" + l.price.toLocaleString("en-ZA") : "POA"}`).join("\n");
+    try {
+      await emailTransporter.sendMail({
+        from: process.env.GMAIL_USER,
+        to: process.env.DAILY_SUMMARY_EMAIL || process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
+        subject: `New quote ${number} — ${custName} (R${total.toLocaleString("en-ZA")})`,
+        text: `Frikkie generated a quote from a chat.\n\nCustomer: ${custName}${custEmail ? " <" + custEmail + ">" : ""}\n\n${itemRows}\n\nSubtotal: R${subtotal.toLocaleString("en-ZA")}\nShipping: R${shipping.toLocaleString("en-ZA")}\nTotal: R${total.toLocaleString("en-ZA")}\n\nPDF attached.`,
+        attachments: [{ filename: `${number}.pdf`, path: join(QUOTES_DIR, file) }],
+      });
+    } catch (e) { console.error("Quote email failed:", e.message); }
+
+    res.json({ ok: true, number, total, subtotal, shipping, pdfUrl: `/quotes/${file}`, itemsCount: lines.length });
+  } catch (error) {
+    console.error("Quote error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/quotes", (req, res) => {
+  try {
+    const rows = db.prepare("SELECT id, number, name, email, subtotal, shipping, total, pdf_file, created_at FROM quotes ORDER BY created_at DESC LIMIT 100").all();
+    res.json({ quotes: rows });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Serve generated quote PDFs
+app.use("/quotes", express.static(QUOTES_DIR));
 
 // ============================================================
 // ADMIN API

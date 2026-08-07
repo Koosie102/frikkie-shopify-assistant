@@ -375,6 +375,37 @@ Drop into your Shopify theme.liquid before </body>
     white-space: nowrap;
   }
 
+  .frikkie-quote-btn {
+    display: inline-block;
+    background: linear-gradient(180deg, #f5b133, #e0991f);
+    color: #241c08;
+    border: none;
+    font-weight: 700;
+    font-size: 13px;
+    padding: 10px 16px;
+    border-radius: 10px;
+    cursor: pointer;
+    text-decoration: none;
+    margin-top: 4px;
+    transition: filter 0.15s;
+  }
+  .frikkie-quote-btn:hover { filter: brightness(1.06); }
+  .frikkie-quote-form { display: flex; flex-direction: column; gap: 8px; }
+  .fq-title { font-size: 13px; font-weight: 600; color: #3a3228; }
+  .fq-input {
+    border: 1px solid #e0d9cc;
+    border-radius: 8px;
+    padding: 9px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+  }
+  .fq-input:focus { border-color: #A89968; }
+  .frikkie-quote-done { display: flex; flex-direction: column; gap: 8px; }
+  .fq-total { font-size: 15px; font-weight: 700; color: #6B5D4F; }
+  .fq-total span { font-size: 11px; font-weight: 400; color: #a09580; }
+  .fq-note { font-size: 11.5px; color: #a09580; }
+
   .frikkie-typing {
     display: flex;
     gap: 5px;
@@ -757,6 +788,7 @@ Drop into your Shopify theme.liquid before </body>
           <div class="frikkie-msg-content">${textHtml}${cardsHtml}</div>
         `;
         messages.appendChild(botDiv);
+        if (data.offerQuote) addQuoteOffer();
         messages.scrollTop = messages.scrollHeight;
       }
     } catch (err) {
@@ -810,6 +842,59 @@ Drop into your Shopify theme.liquid before </body>
     }
     out += escapeHtml(text.slice(last));
     return out.replace(/\n/g, '<br>');
+  }
+
+  // ----- Quote flow -----
+  function addQuoteOffer() {
+    const messages = document.getElementById('frikkie-messages');
+    if (!messages) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'frikkie-message bot';
+    wrap.innerHTML = '<div class="frikkie-avatar">🎩</div><div class="frikkie-msg-content"><button class="frikkie-quote-btn">🧾 Build my quote (PDF)</button></div>';
+    messages.appendChild(wrap);
+    wrap.querySelector('.frikkie-quote-btn').addEventListener('click', () => showQuoteForm(wrap));
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function showQuoteForm(wrap) {
+    const c = wrap.querySelector('.frikkie-msg-content');
+    c.innerHTML =
+      '<div class="frikkie-quote-form">' +
+      '<div class="fq-title">Almost there — where should we send it?</div>' +
+      '<input class="fq-input" id="fq-name" placeholder="Your name" />' +
+      '<input class="fq-input" id="fq-email" placeholder="Your email" type="email" />' +
+      '<button class="frikkie-quote-btn" id="fq-go">Generate quote</button>' +
+      '</div>';
+    const go = c.querySelector('#fq-go');
+    go.addEventListener('click', () => generateQuote(wrap, c.querySelector('#fq-name').value, c.querySelector('#fq-email').value));
+  }
+
+  async function generateQuote(wrap, name, email) {
+    const c = wrap.querySelector('.frikkie-msg-content');
+    c.innerHTML = '<div class="frikkie-quote-form"><div class="fq-title">Sorting out your quote… 📝</div></div>';
+    try {
+      const r = await fetch(API + '/api/quote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conversationId: frikkieConvoId, name: name || '', email: email || '' })
+      });
+      const data = await r.json();
+      if (data.ok) {
+        const url = API + data.pdfUrl;
+        c.innerHTML =
+          '<div class="frikkie-quote-done">' +
+          '<div class="fq-title">Quote ' + escapeHtml(data.number) + ' is ready! 🎉</div>' +
+          '<div class="fq-total">Total: R' + Number(data.total).toLocaleString('en-ZA') + ' <span>(incl. shipping)</span></div>' +
+          '<a class="frikkie-quote-btn" href="' + escapeAttr(url) + '" target="_blank" rel="noopener">⬇ Download PDF</a>' +
+          '<div class="fq-note">Our team has a copy too — we\'ll follow up if you need anything.</div>' +
+          '</div>';
+      } else {
+        c.innerHTML = '<div class="frikkie-quote-form"><div class="fq-title">' + escapeHtml(data.message || "I couldn't build that quote — tell me the exact items and quantities and I'll try again.") + '</div></div>';
+      }
+    } catch (e) {
+      c.innerHTML = '<div class="frikkie-quote-form"><div class="fq-title">Ag, something went wrong generating the quote. Please try again.</div></div>';
+    }
+    document.getElementById('frikkie-messages').scrollTop = 1e9;
   }
 
   // Initialize on load
