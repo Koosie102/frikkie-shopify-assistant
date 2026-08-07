@@ -1,0 +1,821 @@
+<!-- =========================================
+FRIKKIE AI ASSISTANT - COMPLETE WIDGET
+Drop into your Shopify theme.liquid before </body>
+========================================= -->
+
+<style>
+  #frikkie-widget-wrapper {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 9998;
+    font-family: 'Segoe UI', Arial, sans-serif;
+  }
+
+  #frikkie-character {
+    width: 140px;
+    height: 180px;
+    cursor: pointer;
+    user-select: none;
+    filter: drop-shadow(0 6px 20px rgba(0,0,0,0.35));
+    transition: all 0.3s ease;
+  }
+
+  #frikkie-character:hover {
+    filter: drop-shadow(0 8px 25px rgba(0,0,0,0.4));
+    transform: scale(1.04);
+  }
+
+  #frikkie-close-x {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    width: 28px;
+    height: 28px;
+    background: #8B7355;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    font-size: 18px;
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    font-weight: bold;
+  }
+
+  #frikkie-close-x:hover {
+    background: #6B5D4F;
+    transform: scale(1.1);
+  }
+
+  #frikkie-close-x.show {
+    display: flex;
+  }
+
+  /* Minimized Icon */
+  #frikkie-minimized-icon {
+    width: 60px;
+    height: 60px;
+    background: linear-gradient(135deg, #8B7355 0%, #6B5D4F 100%);
+    border-radius: 50%;
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    transition: all 0.3s ease;
+    border: 3px solid white;
+  }
+
+  #frikkie-minimized-icon:hover {
+    transform: scale(1.1);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  }
+
+  #frikkie-minimized-icon.show {
+    display: flex;
+    animation: popIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  @keyframes popIn {
+    from {
+      opacity: 0;
+      transform: scale(0.3);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  /* Animations */
+  @keyframes floaty {
+    0%, 100% { transform: translateY(0px) scale(1); }
+    50% { transform: translateY(-8px) scale(1.01); }
+  }
+
+  @keyframes breathing {
+    0%, 100% { filter: brightness(1); }
+    50% { filter: brightness(1.05); }
+  }
+
+  @keyframes wiggle {
+    0%, 100% { transform: rotate(0deg) scale(1); }
+    25% { transform: rotate(2deg) scale(1.02); }
+    75% { transform: rotate(-2deg) scale(1.02); }
+  }
+
+  #frikkie-character.animated {
+    animation: floaty 4s ease-in-out infinite, breathing 5s ease-in-out infinite;
+  }
+
+  #frikkie-character.wiggle {
+    animation: wiggle 0.4s ease-in-out;
+  }
+
+  /* Speech Bubble */
+  #frikkie-speech {
+    position: absolute;
+    bottom: 200px;
+    right: 0px;
+    background: white;
+    color: #222;
+    padding: 12px 16px;
+    border-radius: 14px;
+    font-size: 13px;
+    max-width: 200px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+    opacity: 0;
+    transform: translateY(10px) scale(0.95);
+    transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    pointer-events: none;
+    font-weight: 500;
+    line-height: 1.5;
+  }
+
+  #frikkie-speech.show {
+    opacity: 1;
+    transform: translateY(0px) scale(1);
+  }
+
+  #frikkie-speech::after {
+    content: '';
+    position: absolute;
+    bottom: -8px;
+    right: 20px;
+    width: 0;
+    height: 0;
+    border-left: 8px solid transparent;
+    border-right: 0px solid transparent;
+    border-top: 8px solid white;
+  }
+
+  /* Chat Window */
+  #frikkie-chat-window {
+    position: fixed;
+    bottom: 200px;
+    right: 20px;
+    width: 480px;
+    height: 650px;
+    background: white;
+    border-radius: 16px;
+    box-shadow: 0 10px 50px rgba(0,0,0,0.25);
+    display: none;
+    flex-direction: column;
+    overflow: hidden;
+    z-index: 9999;
+  }
+
+  #frikkie-chat-window.open {
+    display: flex;
+    animation: slideUp 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(30px) scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .frikkie-header {
+    background: linear-gradient(135deg, #8B7355 0%, #6B5D4F 100%);
+    color: white;
+    padding: 18px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+  }
+
+  .frikkie-header h3 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+  }
+
+  .frikkie-close-btn {
+    background: rgba(255,255,255,0.2);
+    border: none;
+    color: white;
+    cursor: pointer;
+    font-size: 22px;
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .frikkie-close-btn:hover {
+    background: rgba(255,255,255,0.3);
+  }
+
+  .frikkie-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px;
+    background: linear-gradient(to bottom, #fefdfb 0%, #f8f5f0 100%);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .frikkie-message {
+    display: flex;
+    gap: 10px;
+    animation: fadeInUp 0.3s ease;
+  }
+
+  @keyframes fadeInUp {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .frikkie-message.user {
+    justify-content: flex-end;
+  }
+
+  .frikkie-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #8B7355 0%, #6B5D4F 100%);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 18px;
+    font-weight: bold;
+  }
+
+  .frikkie-msg-content {
+    max-width: 75%;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .frikkie-message.bot .frikkie-msg-content {
+    background: white;
+    color: #333;
+    border: 1px solid #e8e3d8;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+
+  .frikkie-message.user .frikkie-msg-content {
+    background: linear-gradient(135deg, #8B7355 0%, #6B5D4F 100%);
+    color: white;
+  }
+
+  .frikkie-link-btn {
+    background: linear-gradient(135deg, #A89968 0%, #8B7355 100%);
+    color: white;
+    border: none;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    font-weight: 600;
+    margin-top: 8px;
+    transition: all 0.2s;
+    text-decoration: none;
+    display: inline-block;
+  }
+
+  .frikkie-link-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 2px 8px rgba(139, 115, 85, 0.3);
+  }
+
+  /* Inline clickable links inside Frikkie's text */
+  .frikkie-msg-content a.frikkie-inline-link {
+    color: #6B5D4F;
+    font-weight: 600;
+    text-decoration: underline;
+  }
+
+  /* Rich product cards */
+  .frikkie-products {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .frikkie-product-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: #fff;
+    border: 1px solid #e8e3d8;
+    border-radius: 10px;
+    padding: 8px;
+    text-decoration: none;
+    color: inherit;
+    transition: all 0.18s;
+  }
+  .frikkie-product-card:hover {
+    border-color: #A89968;
+    box-shadow: 0 4px 14px rgba(139, 115, 85, 0.18);
+    transform: translateY(-1px);
+  }
+  .frikkie-product-thumb {
+    width: 54px;
+    height: 54px;
+    border-radius: 8px;
+    object-fit: cover;
+    background: #f2efe8;
+    flex: none;
+  }
+  .frikkie-product-thumb.placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+  }
+  .frikkie-product-info { flex: 1; min-width: 0; }
+  .frikkie-product-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #3a3228;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .frikkie-product-meta { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
+  .frikkie-product-price { font-size: 13px; font-weight: 700; color: #6B5D4F; }
+  .frikkie-product-vendor { font-size: 11px; color: #a09580; }
+  .frikkie-product-cta {
+    font-size: 11px;
+    font-weight: 600;
+    color: #8B7355;
+    flex: none;
+    align-self: center;
+    white-space: nowrap;
+  }
+
+  .frikkie-typing {
+    display: flex;
+    gap: 5px;
+    padding: 10px 14px;
+    background: white;
+    border-radius: 10px;
+    border: 1px solid #e8e3d8;
+    width: fit-content;
+  }
+
+  .frikkie-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #8B7355;
+    animation: bounce 1.4s infinite;
+  }
+
+  .frikkie-dot:nth-child(2) { animation-delay: 0.2s; }
+  .frikkie-dot:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.6; }
+    30% { transform: translateY(-8px); opacity: 1; }
+  }
+
+  .frikkie-input-area {
+    padding: 14px;
+    border-top: 1px solid #e8e3d8;
+    display: flex;
+    gap: 8px;
+    background: white;
+  }
+
+  #frikkie-input {
+    flex: 1;
+    border: 1.5px solid #d4c4b0;
+    border-radius: 8px;
+    padding: 9px 12px;
+    font-family: inherit;
+    font-size: 13px;
+    background: #fafaf8;
+    transition: all 0.2s;
+  }
+
+  #frikkie-input:focus {
+    outline: none;
+    border-color: #8B7355;
+    background: white;
+    box-shadow: 0 0 0 3px rgba(139, 115, 85, 0.1);
+  }
+
+  .frikkie-send-btn {
+    background: linear-gradient(135deg, #8B7355 0%, #6B5D4F 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 18px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 13px;
+    transition: all 0.2s;
+  }
+
+  .frikkie-send-btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 3px 10px rgba(139, 115, 85, 0.3);
+  }
+
+  .frikkie-send-btn:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  .frikkie-messages::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .frikkie-messages::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .frikkie-messages::-webkit-scrollbar-thumb {
+    background: #8B7355;
+    border-radius: 3px;
+  }
+
+  .frikkie-messages::-webkit-scrollbar-thumb:hover {
+    background: #6B5D4F;
+  }
+
+  @media (max-width: 480px) {
+    #frikkie-character {
+      width: 110px;
+      height: 140px;
+    }
+
+    #frikkie-minimized-icon {
+      width: 50px;
+      height: 50px;
+      font-size: 24px;
+    }
+
+    #frikkie-chat-window {
+      width: calc(100vw - 20px);
+      height: 75vh;
+      bottom: 150px;
+      right: 10px;
+    }
+
+    #frikkie-speech {
+      bottom: 150px;
+      max-width: 180px;
+      font-size: 12px;
+    }
+  }
+</style>
+
+<div id="frikkie-widget-wrapper">
+  <!-- Minimized Chat Icon (hidden by default) -->
+  <button id="frikkie-minimized-icon" onclick="frikkieExpand();" title="Open Frikkie Chat">💬</button>
+
+  <!-- Full Character (shown by default) -->
+  <div id="frikkie-character-container">
+    <!-- Close/Minimize Button -->
+    <button id="frikkie-close-x" onclick="frikkieMinimize();" title="Minimize Frikkie">✕</button>
+
+    <!-- Character Image -->
+    <img 
+      id="frikkie-character" 
+      src="https://cdn.shopify.com/s/files/1/0539/2878/8145/files/frikkie.png?v=1779277557"
+      alt="Frikkie - Your 4x4 Expert"
+      class="animated"
+    />
+
+    <!-- Speech Bubble -->
+    <div id="frikkie-speech"></div>
+  </div>
+
+  <!-- Chat Window -->
+  <div id="frikkie-chat-window">
+    <div class="frikkie-header">
+      <h3>🎩 Frikkie</h3>
+      <button class="frikkie-close-btn" onclick="frikkieClosedChat();">✕</button>
+    </div>
+    <div class="frikkie-messages" id="frikkie-messages">
+      <div class="frikkie-message bot">
+        <div class="frikkie-avatar">🎩</div>
+        <div class="frikkie-msg-content">
+          Howzit! 👋 I'm Frikkie. Need help finding something or have questions about 4x4 lighting? Fire away!
+        </div>
+      </div>
+    </div>
+    <div class="frikkie-input-area">
+      <input 
+        type="text" 
+        id="frikkie-input" 
+        placeholder="Ask me..."
+        onkeypress="if(event.key==='Enter') frikkieSendMsg();"
+      />
+      <button class="frikkie-send-btn" id="frikkie-send-btn" onclick="frikkieSendMsg();">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const API = 'https://frikkie-shopify-assistant-production.up.railway.app';
+  let frikkieConvoId = localStorage.getItem('frikkie_convo_id') || null;
+  let frikkieSending = false;
+  let frikkieMinimized = localStorage.getItem('frikkie_minimized') === 'true';
+
+  const greetings = [
+    "Need help with something?",
+    "Got a question about our lights?",
+    "Looking for a product?",
+    "Howzit! Any questions?",
+    "What can I help with?"
+  ];
+
+  // Initialize state
+  function initFrikkie() {
+    if (frikkieMinimized) {
+      minimizeState();
+    } else {
+      expandState();
+    }
+  }
+
+  // Show speech bubble
+  function showSpeech(text) {
+    const bubble = document.getElementById('frikkie-speech');
+    if (!bubble) return;
+    
+    bubble.textContent = text;
+    bubble.classList.add('show');
+
+    clearTimeout(window.bubbleTimer);
+    window.bubbleTimer = setTimeout(() => {
+      bubble.classList.remove('show');
+    }, 5000);
+  }
+
+  // Click interaction - open chat
+  document.getElementById('frikkie-character').addEventListener('click', () => {
+    const chat = document.getElementById('frikkie-chat-window');
+    chat.classList.toggle('open');
+
+    if (chat.classList.contains('open')) {
+      setTimeout(() => document.getElementById('frikkie-input').focus(), 300);
+      showSpeech("Let's chat!");
+      document.getElementById('frikkie-close-x').classList.add('show');
+    } else {
+      document.getElementById('frikkie-close-x').classList.remove('show');
+    }
+
+    // Wiggle animation
+    const char = document.getElementById('frikkie-character');
+    char.classList.add('wiggle');
+    setTimeout(() => char.classList.remove('wiggle'), 400);
+  });
+
+  // Minimize to icon
+  function frikkieMinimize() {
+    frikkieMinimized = true;
+    localStorage.setItem('frikkie_minimized', 'true');
+    minimizeState();
+    showSpeech("I'll be here if you need me!");
+  }
+
+  function minimizeState() {
+    document.getElementById('frikkie-character-container').style.display = 'none';
+    document.getElementById('frikkie-minimized-icon').classList.add('show');
+    document.getElementById('frikkie-chat-window').classList.remove('open');
+    document.getElementById('frikkie-close-x').classList.remove('show');
+  }
+
+  // Expand from icon
+  function frikkieExpand() {
+    frikkieMinimized = false;
+    localStorage.setItem('frikkie_minimized', 'false');
+    expandState();
+    showSpeech("Back for a chat!");
+  }
+
+  function expandState() {
+    document.getElementById('frikkie-character-container').style.display = 'block';
+    document.getElementById('frikkie-minimized-icon').classList.remove('show');
+  }
+
+  // Random greeting periodically (only if not minimized)
+  setInterval(() => {
+    if (!frikkieMinimized) {
+      const text = greetings[Math.floor(Math.random() * greetings.length)];
+      showSpeech(text);
+    }
+  }, 25000);
+
+  // First greeting
+  setTimeout(() => {
+    if (!frikkieMinimized) {
+      showSpeech("Howzit! Click me to chat 👋");
+    }
+  }, 1500);
+
+  // Close chat window
+  function frikkieClosedChat() {
+    document.getElementById('frikkie-chat-window').classList.remove('open');
+    document.getElementById('frikkie-close-x').classList.remove('show');
+    showSpeech("See you soon!");
+  }
+
+  // Send message
+  async function frikkieSendMsg() {
+    if (frikkieSending) return;
+
+    const input = document.getElementById('frikkie-input');
+    const msg = input.value.trim();
+
+    if (!msg) return;
+
+    frikkieSending = true;
+    document.getElementById('frikkie-send-btn').disabled = true;
+
+    const messages = document.getElementById('frikkie-messages');
+
+    // User message
+    const userDiv = document.createElement('div');
+    userDiv.className = 'frikkie-message user';
+    userDiv.innerHTML = `
+      <div class="frikkie-msg-content">${escapeHtml(msg)}</div>
+      <div class="frikkie-avatar">You</div>
+    `;
+    messages.appendChild(userDiv);
+    input.value = '';
+    messages.scrollTop = messages.scrollHeight;
+
+    // Typing indicator
+    const typingDiv = document.createElement('div');
+    typingDiv.className = 'frikkie-message bot';
+    typingDiv.innerHTML = `
+      <div class="frikkie-avatar">🎩</div>
+      <div class="frikkie-typing">
+        <div class="frikkie-dot"></div>
+        <div class="frikkie-dot"></div>
+        <div class="frikkie-dot"></div>
+      </div>
+    `;
+    messages.appendChild(typingDiv);
+    messages.scrollTop = messages.scrollHeight;
+
+    try {
+      const res = await fetch(API + '/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: msg,
+          conversationId: frikkieConvoId,
+          email: '',
+          orderNumber: ''
+        })
+      });
+
+      if (!res.ok) throw new Error(`Status ${res.status}`);
+
+      const data = await res.json();
+
+      if (data.conversationId) {
+        frikkieConvoId = data.conversationId;
+        localStorage.setItem('frikkie_convo_id', frikkieConvoId);
+      }
+
+      messages.removeChild(typingDiv);
+
+      if (data.message) {
+        const botDiv = document.createElement('div');
+        botDiv.className = 'frikkie-message bot';
+
+        const products = Array.isArray(data.products) ? data.products : [];
+        // URLs shown as product cards shouldn't also clutter the text
+        const cardUrls = new Set(products.map(p => p.url));
+
+        // Build the text: strip product URLs we're carding, linkify the rest
+        let textHtml = renderMessageText(data.message, cardUrls);
+
+        // Fallback: if Frikkie named a brand but no product cards resolved, offer the collection
+        if (!products.length) {
+          const lower = data.message.toLowerCase();
+          if (lower.includes('altiq')) textHtml += '<br><a href="/collections/altiq" target="_blank" rel="noopener" class="frikkie-link-btn">View ALTIQ Lights →</a>';
+          if (lower.includes('ultra')) textHtml += '<br><a href="/collections/ultra" target="_blank" rel="noopener" class="frikkie-link-btn">View ULTRA Lights →</a>';
+          if (lower.includes('stedi')) textHtml += '<br><a href="/collections/stedi" target="_blank" rel="noopener" class="frikkie-link-btn">View STEDI Lights →</a>';
+        }
+
+        // Product cards
+        let cardsHtml = '';
+        if (products.length) {
+          cardsHtml = '<div class="frikkie-products">' + products.map(p => {
+            const price = (p.price != null) ? ('R' + Number(p.price).toLocaleString('en-ZA')) : '';
+            const thumb = p.image
+              ? `<img class="frikkie-product-thumb" src="${escapeAttr(p.image)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'frikkie-product-thumb placeholder',textContent:'💡'}))"/>`
+              : `<div class="frikkie-product-thumb placeholder">💡</div>`;
+            return `<a class="frikkie-product-card" href="${escapeAttr(p.url)}" target="_blank" rel="noopener">
+              ${thumb}
+              <div class="frikkie-product-info">
+                <div class="frikkie-product-title">${escapeHtml(p.title)}</div>
+                <div class="frikkie-product-meta">
+                  ${price ? `<span class="frikkie-product-price">${price}</span>` : ''}
+                  ${p.vendor ? `<span class="frikkie-product-vendor">${escapeHtml(p.vendor)}</span>` : ''}
+                </div>
+              </div>
+              <span class="frikkie-product-cta">View →</span>
+            </a>`;
+          }).join('') + '</div>';
+        }
+
+        botDiv.innerHTML = `
+          <div class="frikkie-avatar">🎩</div>
+          <div class="frikkie-msg-content">${textHtml}${cardsHtml}</div>
+        `;
+        messages.appendChild(botDiv);
+        messages.scrollTop = messages.scrollHeight;
+      }
+    } catch (err) {
+      console.error('[Frikkie]', err);
+      messages.removeChild(typingDiv);
+
+      const errDiv = document.createElement('div');
+      errDiv.className = 'frikkie-message bot';
+      errDiv.innerHTML = `
+        <div class="frikkie-avatar">⚠️</div>
+        <div class="frikkie-msg-content">Ag, sorry! Something went wrong. Try again?</div>
+      `;
+      messages.appendChild(errDiv);
+    } finally {
+      frikkieSending = false;
+      document.getElementById('frikkie-send-btn').disabled = false;
+      document.getElementById('frikkie-input').focus();
+    }
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text == null ? '' : String(text);
+    return div.innerHTML;
+  }
+
+  function escapeAttr(text) {
+    return escapeHtml(text).replace(/"/g, '&quot;');
+  }
+
+  // Escape text, remove URLs shown as cards, and turn remaining URLs into clickable links
+  function renderMessageText(text, cardUrls) {
+    cardUrls = cardUrls || new Set();
+    const urlRe = /(https?:\/\/[^\s]+)/g;
+    let out = '';
+    let last = 0, m;
+    while ((m = urlRe.exec(text)) !== null) {
+      out += escapeHtml(text.slice(last, m.index));
+      let url = m[0];
+      let trail = '';
+      const tm = url.match(/[).,!?;:]+$/);   // keep trailing punctuation out of the link
+      if (tm) { trail = tm[0]; url = url.slice(0, -trail.length); }
+      if (cardUrls.has(url)) {
+        // shown as a card below — drop a bare "(link)" so the sentence still reads
+        out = out.replace(/\s*$/, '');
+      } else {
+        out += `<a href="${escapeAttr(url)}" target="_blank" rel="noopener" class="frikkie-inline-link">View product →</a>`;
+      }
+      out += escapeHtml(trail);
+      last = m.index + m[0].length;
+    }
+    out += escapeHtml(text.slice(last));
+    return out.replace(/\n/g, '<br>');
+  }
+
+  // Initialize on load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initFrikkie);
+  } else {
+    initFrikkie();
+  }
+</script>
