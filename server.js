@@ -57,6 +57,15 @@ db.exec(`
     FOREIGN KEY(conversation_id) REFERENCES conversations(id)
   );
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+
+  CREATE TABLE IF NOT EXISTS knowledge (
+    id TEXT PRIMARY KEY,
+    rule TEXT NOT NULL,
+    active INTEGER DEFAULT 1,
+    source TEXT DEFAULT 'manual',
+    conversation_id TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Safe migrations for older DBs
@@ -177,6 +186,19 @@ function findRelevantProducts(message, limit = 25) {
   return (hits.length ? hits : scored).slice(0, limit).map((s) => s.p);
 }
 
+function buildKnowledgeContext() {
+  const rules = db.prepare("SELECT rule FROM knowledge WHERE active = 1 ORDER BY created_at").all().map((r) => r.rule);
+  if (!rules.length) return "";
+  const lines = rules.map((r, i) => `${i + 1}. ${r}`).join("\n");
+  return `
+
+=== SHOP CORRECTIONS & HOUSE RULES (authoritative — always follow, overrides your assumptions) ===
+${lines}
+
+When one of these rules applies, follow it AND briefly clarify the distinction to the customer in a natural, friendly way (e.g. mention the beam pattern) rather than silently swapping terms.
+=== END SHOP CORRECTIONS ===`;
+}
+
 function buildCatalogContext(message) {
   if (!PRODUCT_CATALOG.length) return "\n\n(Product catalog is not loaded right now - answer generally and suggest the customer browse the store.)";
   const relevant = findRelevantProducts(message);
@@ -240,6 +262,7 @@ const FRIKKIE_SYSTEM = `You are Frikkie, a friendly South African 4x4 lighting e
 - Use the STORE KNOWLEDGE section below for all product facts - it's your single source of truth about what the store sells.
 - When you recommend a specific product, include its full store link so the customer can click through.
 - Never invent products, prices, or brands. If something isn't in the store knowledge, say you're not certain and offer to check.
+- If a SHOP CORRECTIONS & HOUSE RULES section is present below, treat it as authoritative — it reflects how this shop actually talks about its products and overrides your general assumptions.
 - Early on, in a natural friendly way, ask the customer's first name so you can chat properly.
 - If they want a quote, a stock check, or someone to follow up with them, ask for their email address so the team can get back to them.`;
 
@@ -292,7 +315,7 @@ app.post("/api/chat", async (req, res) => {
     const history = db.prepare("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 10")
       .all(convoId).reverse().map((mm) => ({ role: mm.role, content: mm.content }));
     const messages = [...history, { role: "user", content: message }];
-    const systemPrompt = FRIKKIE_SYSTEM + buildCatalogContext(message);
+    const systemPrompt = FRIKKIE_SYSTEM + buildKnowledgeContext() + buildCatalogContext(message);
 
     const response = await client.messages.create({ model: "claude-sonnet-5", max_tokens: 1024, system: systemPrompt, messages });
     let assistantMessage = (response.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
@@ -424,6 +447,37 @@ app.post("/api/admin/settings", (req, res) => {
     if (typeof greeting === "string" && greeting.trim()) setSetting("greeting", greeting.trim());
     res.json({ ok: true, avatarUrl: getSetting("avatar_url"), greeting: getSetting("greeting") });
   } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Knowledge / corrections ("teach Frikkie")
+app.get("/api/admin/knowledge", (req, res) => {
+  try {
+    const rows = db.prepare("SELECT id, rule, active, source, conversation_id, created_at FROM knowledge ORDER BY created_at DESC").all();
+    res.json({ knowledge: rows });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post("/api/admin/knowledge", (req, res) => {
+  try {
+    const { rule, source, conversationId } = req.body;
+    if (!rule || !rule.trim()) return res.status(400).json({ error: "Rule text required" });
+    const id = uuidv4();
+    db.prepare("INSERT INTO knowledge (id, rule, active, source, conversation_id, created_at) VALUES (?, ?, 1, ?, ?, ?)")
+      .run(id, rule.trim(), source === "chat" ? "chat" : "manual", conversationId || null, new Date().toISOString());
+    res.json({ ok: true, id });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post("/api/admin/knowledge/:id", (req, res) => {
+  try {
+    const { rule, active } = req.body;
+    if (typeof rule === "string" && rule.trim()) db.prepare("UPDATE knowledge SET rule = ? WHERE id = ?").run(rule.trim(), req.params.id);
+    if (typeof active === "boolean") db.prepare("UPDATE knowledge SET active = ? WHERE id = ?").run(active ? 1 : 0, req.params.id);
+    const row = db.prepare("SELECT id, rule, active, source, conversation_id, created_at FROM knowledge WHERE id = ?").get(req.params.id);
+    res.json({ ok: true, rule: row });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.delete("/api/admin/knowledge/:id", (req, res) => {
+  try { db.prepare("DELETE FROM knowledge WHERE id = ?").run(req.params.id); res.json({ ok: true }); }
+  catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post("/api/refresh-catalog", async (req, res) => {

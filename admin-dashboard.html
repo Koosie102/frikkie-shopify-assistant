@@ -96,6 +96,12 @@
   .chip.ok{background:rgba(123,191,106,.16);color:var(--good)}
   .chip.no{background:rgba(217,97,75,.16);color:var(--bad)}
   .brandwrap{display:flex;flex-wrap:wrap;gap:7px;padding:16px 18px}
+  .krow{display:flex;gap:14px;align-items:flex-start;padding:14px 18px;border-bottom:1px solid rgba(51,46,35,.5)}
+  .krow:last-child{border-bottom:none}
+  .kbody{flex:1;min-width:0}
+  .ktext{font-size:14px;line-height:1.5;color:var(--bone)}
+  .kmeta{display:flex;align-items:center;gap:8px;margin-top:7px}
+  .kactions{display:flex;gap:6px;flex:none}
   .modal-bg{position:fixed;inset:0;background:rgba(8,7,5,.72);backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center;padding:20px;z-index:50}
   .modal-bg.open{display:flex}
   .modal{background:var(--bush-panel);border:1px solid var(--line);border-radius:16px;max-width:660px;width:100%;max-height:86vh;display:flex;flex-direction:column;box-shadow:0 30px 80px rgba(0,0,0,.6)}
@@ -140,6 +146,7 @@
     <button class="tab active" data-view="overview">Overview</button>
     <button class="tab" data-view="chats">Conversations <span id="chatsTabCnt" class="tabcnt" style="display:none"></span></button>
     <button class="tab" data-view="customers">Customers</button>
+    <button class="tab" data-view="knowledge">Knowledge</button>
     <button class="tab" data-view="status">Status</button>
     <button class="tab" data-view="settings">Settings</button>
   </nav>
@@ -183,6 +190,24 @@
         <div class="right"><a class="btn beam" href="/api/admin/customers.csv">⬇ Export CSV</a></div>
       </div>
       <div id="custWrap"><div class="skel">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- KNOWLEDGE -->
+  <section class="view" id="view-knowledge">
+    <div class="panel">
+      <div class="panel-h"><h2>Teach Frikkie</h2></div>
+      <div style="padding:18px">
+        <p class="hint" style="margin-bottom:12px">Write shop-specific rules and corrections. Frikkie reads these on every chat and treats them as the final word — so a fix you make once sticks for good. He'll apply the rule and briefly explain it to the customer.</p>
+        <div class="field" style="margin-bottom:10px">
+          <textarea class="txt" id="newRule" rows="3" placeholder="e.g. Customers use 'spotlight' and 'driving light' to mean the same thing — treat them as identical, and clarify beam pattern (spot vs flood) instead of assuming."></textarea>
+        </div>
+        <button class="btn beam" id="addRule">+ Add rule</button>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h2>Frikkie's house rules</h2><div class="right"><span class="muted" id="ruleCount"></span></div></div>
+      <div id="knowledgeWrap"><div class="skel">Loading…</div></div>
     </div>
   </section>
 
@@ -256,6 +281,7 @@ function go(v,filter){
   document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active',s.id==='view-'+v));
   if(v==='chats'){ if(filter!==undefined){chatFilter=filter;syncChips();} loadChats(); }
   if(v==='customers')loadCustomers();
+  if(v==='knowledge')loadKnowledge();
   if(v==='status')loadStatus();
   if(v==='settings')loadSettings();
   if(v==='overview')loadOverview();
@@ -364,6 +390,7 @@ async function openConvo(id){
     acts+='<button class="btn sm" onclick="savePdf()">🖨 Save as PDF</button>';
     acts+='<button class="btn good sm" id="respBtn" onclick="toggleResponded()">'+(conversation.responded?'✓ Responded':'Mark responded')+'</button>';
     acts+='<button class="btn sm" id="readBtn" onclick="toggleRead()">Mark unread</button>';
+    acts+='<button class="btn sm" onclick="teachFromConvo()">🎓 Teach Frikkie</button>';
     $('#mActions').innerHTML=acts;
     let h='';
     for(const m of messages){const who=m.role==='user'?(conversation.name||'Customer'):'Frikkie';h+='<div class="bubble '+esc(m.role)+'"><div class="who">'+esc(who)+'</div>'+esc(m.content)+'</div>';}
@@ -454,6 +481,51 @@ $('#sendSummary').addEventListener('click',async e=>{const b=e.target;b.disabled
 async function loadSettings(){try{const s=await api('/api/admin/settings');$('#avatarUrl').value=s.avatarUrl||'';$('#greeting').value=s.greeting||'';$('#avatarPrev').src=s.avatarUrl||'';}catch(e){}}
 $('#avatarUrl')&&$('#avatarUrl').addEventListener('input',e=>{$('#avatarPrev').src=e.target.value;});
 $('#saveSettings').addEventListener('click',async()=>{try{const body={avatarUrl:$('#avatarUrl').value,greeting:$('#greeting').value};await api('/api/admin/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast('Saved');if(body.avatarUrl)$('#hdrAvatar').src=body.avatarUrl;}catch(e){toast('Save failed',true);}});
+
+/* ---------- Knowledge / Teach Frikkie ---------- */
+async function loadKnowledge(){
+  try{
+    const {knowledge}=await api('/api/admin/knowledge');
+    $('#ruleCount').textContent=knowledge.length?(knowledge.filter(k=>k.active).length+' active · '+knowledge.length+' total'):'';
+    const el=$('#knowledgeWrap');
+    if(!knowledge.length){el.innerHTML='<div class="empty"><div class="big">No rules yet</div>Add your first correction above — like the spotlight vs driving light one.</div>';return;}
+    el.innerHTML=knowledge.map(k=>{
+      const src=k.source==='chat'?'<span class="statuschip sc-unread">from a chat</span>':'<span class="statuschip sc-done">manual</span>';
+      const state=k.active?'':' style="opacity:.5"';
+      return '<div class="krow"'+state+'>'
+        +'<div class="kbody"><div class="ktext">'+esc(k.rule)+'</div><div class="kmeta">'+src+' <span class="muted">'+timeAgo(k.created_at)+'</span></div></div>'
+        +'<div class="kactions">'
+        +'<button class="btn sm" onclick="toggleRule(\''+k.id+'\','+(k.active?'false':'true')+')">'+(k.active?'Disable':'Enable')+'</button>'
+        +'<button class="btn sm danger" onclick="deleteRule(\''+k.id+'\')">Delete</button>'
+        +'</div></div>';
+    }).join('');
+  }catch(e){$('#knowledgeWrap').innerHTML='<div class="empty">Could not load rules.</div>';}
+}
+async function addRule(){
+  const t=$('#newRule').value.trim();
+  if(!t){toast('Write a rule first',true);return;}
+  try{await api('/api/admin/knowledge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rule:t,source:'manual'})});
+    $('#newRule').value='';toast('Rule added — Frikkie will use it from his next reply');loadKnowledge();}
+  catch(e){toast('Could not add rule',true);}
+}
+async function toggleRule(id,active){
+  try{await api('/api/admin/knowledge/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:active})});loadKnowledge();}
+  catch(e){toast('Could not update',true);}
+}
+async function deleteRule(id){
+  if(!confirm('Delete this rule? Frikkie will stop applying it.'))return;
+  try{await api('/api/admin/knowledge/'+id,{method:'DELETE'});toast('Rule deleted');loadKnowledge();}
+  catch(e){toast('Could not delete',true);}
+}
+async function teachFromConvo(){
+  if(!curConvo)return;
+  const rule=prompt("Teach Frikkie a rule from this chat.\n\nDescribe what he should do — it becomes a permanent house rule.\n\nExample: \"When someone asks for spotlights, treat it the same as driving lights and clarify the beam pattern.\"");
+  if(!rule||!rule.trim())return;
+  try{await api('/api/admin/knowledge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rule:rule.trim(),source:'chat',conversationId:curConvo.id})});
+    toast('Got it — Frikkie has learned that rule');}
+  catch(e){toast('Could not save the rule',true);}
+}
+$('#addRule').addEventListener('click',addRule);
 
 async function boot(){await ping();try{const set=await api('/api/admin/settings');if(set.avatarUrl)$('#hdrAvatar').src=set.avatarUrl;}catch(e){}loadOverview();}
 boot();
