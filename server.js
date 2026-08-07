@@ -294,7 +294,7 @@ app.post("/api/chat", async (req, res) => {
     const messages = [...history, { role: "user", content: message }];
     const systemPrompt = FRIKKIE_SYSTEM + buildCatalogContext(message);
 
-    const response = await client.messages.create({ model: "claude-opus-4-1", max_tokens: 500, system: systemPrompt, messages });
+    const response = await client.messages.create({ model: "claude-sonnet-5", max_tokens: 500, system: systemPrompt, messages });
     const assistantMessage = response.content[0].type === "text" ? response.content[0].text : "";
     const cost = calculateCost(response.usage.input_tokens, response.usage.output_tokens);
     const ts = new Date().toISOString();
@@ -485,7 +485,7 @@ async function buildAndSendSummary() {
           msgs.map((mm) => `${mm.role === "user" ? "Customer" : "Frikkie"}: ${mm.content}`).join("\n"));
       }
       const resp = await client.messages.create({
-        model: "claude-opus-4-1",
+        model: "claude-sonnet-5",
         max_tokens: 400,
         system: "You are Frikkie summarising the day's customer chats for the shop owner. Write a short, friendly plain-text daily briefing (5-8 sentences max). Call out anything that needs the owner to follow up, any quote requests, and any products customers were keen on. Be specific but concise. No markdown.",
         messages: [{ role: "user", content: `Here are today's conversations:\n\n${parts.join("\n\n---\n\n")}` }],
